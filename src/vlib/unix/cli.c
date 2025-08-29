@@ -46,6 +46,7 @@
 /*? %%syscfg:group_label Command line session %% ?*/
 
 #include <vlib/vlib.h>
+#include <vlib/file.h>
 #include <vlib/unix/unix.h>
 
 #include <ctype.h>
@@ -1102,7 +1103,7 @@ unix_vlib_cli_output (uword cli_file_index, u8 * buffer, uword buffer_bytes)
   clib_file_t *uf;
 
   cf = pool_elt_at_index (cm->cli_file_pool, cli_file_index);
-  uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  uf = clib_file_get (fm, cf->clib_file_index);
 
   if (cf->no_pager || um->cli_pager_buffer_limit == 0 || cf->height == 0)
     {
@@ -1244,7 +1245,7 @@ unix_cli_file_welcome (unix_cli_main_t * cm, unix_cli_file_t * cf)
 {
   unix_main_t *um = &unix_main;
   clib_file_main_t *fm = &file_main;
-  clib_file_t *uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  clib_file_t *uf = clib_file_get (fm, cf->clib_file_index);
   unix_cli_banner_t *banner;
   int i, len;
 
@@ -2460,7 +2461,7 @@ static int
 unix_cli_line_edit (unix_cli_main_t * cm, unix_main_t * um,
 		    clib_file_main_t * fm, unix_cli_file_t * cf)
 {
-  clib_file_t *uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  clib_file_t *uf = clib_file_get (fm, cf->clib_file_index);
   int i;
 
   for (i = 0; i < vec_len (cf->input_vector); i++)
@@ -2628,7 +2629,7 @@ more:
 
   /* Re-fetch pointer since pool may have moved. */
   cf = pool_elt_at_index (cm->cli_file_pool, cli_file_index);
-  uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  uf = clib_file_get (fm, cf->clib_file_index);
 
 done:
   /* reset vector; we'll re-use it later  */
@@ -2707,7 +2708,7 @@ unix_cli_kill (unix_cli_main_t * cm, uword cli_file_index)
     }
 
   cf = pool_elt_at_index (cm->cli_file_pool, cli_file_index);
-  uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  uf = clib_file_get (fm, cf->clib_file_index);
 
   /* Quit/EOF on stdin means quit program. */
   if (uf->file_descriptor == STDIN_FILENO)
@@ -3015,7 +3016,7 @@ unix_cli_listen_read_ready (clib_file_t * uf)
       cf->height = UNIX_CLI_DEFAULT_TERMINAL_HEIGHT;
 
       /* Send the telnet options */
-      uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+      uf = clib_file_get (fm, cf->clib_file_index);
       unix_vlib_cli_output_raw (cf, uf, charmode_option,
 				ARRAY_LEN (charmode_option));
 
@@ -3050,7 +3051,7 @@ unix_cli_resize_interrupt (int signum)
   unix_cli_main_t *cm = &unix_cli_main;
   unix_cli_file_t *cf = pool_elt_at_index (cm->cli_file_pool,
 					   cm->stdin_cli_file_index);
-  clib_file_t *uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+  clib_file_t *uf = clib_file_get (fm, cf->clib_file_index);
   struct winsize ws;
   (void) signum;
 
@@ -3548,45 +3549,6 @@ VLIB_CLI_COMMAND (cli_unix_show_errors, static) = {
   .function = unix_show_errors,
 };
 
-/** CLI command to show various unix error statistics. */
-static clib_error_t *
-unix_show_files (vlib_main_t * vm,
-		 unformat_input_t * input, vlib_cli_command_t * cmd)
-{
-  clib_error_t *error = 0;
-  clib_file_main_t *fm = &file_main;
-  clib_file_t *f;
-  char path[PATH_MAX];
-  u8 *s = 0;
-
-  vlib_cli_output (vm, "%3s %6s %12s %12s %12s %-32s %s", "FD", "Thread",
-		   "Read", "Write", "Error", "File Name", "Description");
-
-  pool_foreach (f, fm->file_pool)
-   {
-      int rv;
-      s = format (s, "/proc/self/fd/%d%c", f->file_descriptor, 0);
-      rv = readlink((char *) s, path, PATH_MAX - 1);
-
-      path[rv < 0 ? 0 : rv] = 0;
-
-      vlib_cli_output (vm, "%3d %6d %12d %12d %12d %-32s %v",
-		       f->file_descriptor, f->polling_thread_index,
-		       f->read_events, f->write_events, f->error_events,
-		       path, f->description);
-      vec_reset_length (s);
-    }
-  vec_free (s);
-
-  return error;
-}
-
-VLIB_CLI_COMMAND (cli_unix_show_files, static) = {
-  .path = "show unix files",
-  .short_help = "Show Unix files in use",
-  .function = unix_show_files,
-};
-
 /** CLI command to show session command history. */
 static clib_error_t *
 unix_cli_show_history (vlib_main_t * vm,
@@ -3713,7 +3675,7 @@ unix_cli_show_cli_sessions (vlib_main_t * vm,
     {
       int j = 0;
 
-      uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+      uf = clib_file_get (fm, cf->clib_file_index);
       table_format_cell (t, i, j++, "%u", cf->process_node_index);
       table_format_cell (t, i, j++, "%u", uf->file_descriptor);
       table_format_cell (t, i, j++, "%v", cf->name);

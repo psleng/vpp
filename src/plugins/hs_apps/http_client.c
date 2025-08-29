@@ -22,7 +22,7 @@ typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   u32 session_index;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   u64 to_recv;
   u8 is_closed;
   hc_stats_t stats;
@@ -35,7 +35,7 @@ typedef struct
 typedef struct
 {
   hc_session_t *sessions;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   vlib_main_t *vlib_main;
   u8 *headers_buf;
   http_headers_ctx_t req_headers;
@@ -82,6 +82,7 @@ typedef struct
   u64 appns_secret;
   clib_spinlock_t lock;
   bool was_transport_closed;
+  u32 ckpair_index;
 } hc_main_t;
 
 typedef enum
@@ -97,16 +98,15 @@ static hc_main_t hc_main;
 static hc_stats_t hc_stats;
 
 static inline hc_worker_t *
-hc_worker_get (u32 thread_index)
+hc_worker_get (clib_thread_index_t thread_index)
 {
   return &hc_main.wrk[thread_index];
 }
 
 static inline hc_session_t *
-hc_session_get (u32 session_index, u32 thread_index)
+hc_session_get (u32 session_index, clib_thread_index_t thread_index)
 {
   hc_worker_t *wrk = hc_worker_get (thread_index);
-  wrk->vlib_main = vlib_get_main_by_index (thread_index);
   return pool_elt_at_index (wrk->sessions, session_index);
 }
 
@@ -196,16 +196,17 @@ hc_session_connected_callback (u32 app_index, u32 hc_session_index,
   hc_session_t *hc_session;
   hc_http_header_t *header;
 
+  wrk = hc_worker_get (s->thread_index);
+
   if (err)
     {
       clib_warning ("hc_session_index[%d] connected error: %U",
 		    hc_session_index, format_session_error, err);
-      vlib_process_signal_event_mt (vlib_get_main (), hcm->cli_node_index,
+      vlib_process_signal_event_mt (wrk->vlib_main, hcm->cli_node_index,
 				    HC_CONNECT_FAILED, 0);
       return -1;
     }
 
-  wrk = hc_worker_get (s->thread_index);
   hc_session = hc_session_alloc (wrk);
   clib_spinlock_lock_if_init (&hcm->lock);
   hcm->connected_counter++;
@@ -284,9 +285,7 @@ hc_session_connected_callback (u32 app_index, u32 hc_session_index,
 	}
     }
 
-  if (hcm->repeat)
-    hc_session->stats.start =
-      vlib_time_now (vlib_get_main_by_index (s->thread_index));
+  hc_session->stats.start = vlib_time_now (wrk->vlib_main);
 
   return hc_request (s, wrk, hc_session, err);
 }
@@ -451,12 +450,12 @@ hc_rx_callback (session_t *s)
 done:
   if (hc_session->to_recv == 0)
     {
+      hc_session->stats.end = vlib_time_now (wrk->vlib_main);
+      hc_session->stats.elapsed_time =
+	hc_session->stats.end - hc_session->stats.start;
       if (hcm->repeat)
 	{
 	  hc_session->stats.request_count++;
-	  hc_session->stats.end = vlib_time_now (wrk->vlib_main);
-	  hc_session->stats.elapsed_time =
-	    hc_session->stats.end - hc_session->stats.start;
 
 	  if (hc_session->stats.elapsed_time >= hcm->duration &&
 	      hc_session->stats.request_count >= hc_session->stats.req_per_wrk)
@@ -526,6 +525,7 @@ hc_attach ()
   vnet_app_attach_args_t _a, *a = &_a;
   u64 options[18];
   u32 segment_size = 128 << 20;
+  vnet_app_add_cert_key_pair_args_t _ck_pair, *ck_pair = &_ck_pair;
   int rv;
 
   if (hcm->private_segment_size)
@@ -546,6 +546,7 @@ hc_attach ()
     hcm->fifo_size ? hcm->fifo_size : 32 << 10;
   a->options[APP_OPTIONS_FLAGS] = APP_OPTIONS_FLAGS_IS_BUILTIN;
   a->options[APP_OPTIONS_PREALLOC_FIFO_PAIRS] = hcm->prealloc_fifos;
+  a->options[APP_OPTIONS_TLS_ENGINE] = CRYPTO_ENGINE_OPENSSL;
   if (hcm->appns_id)
     {
       a->namespace_id = hcm->appns_id;
@@ -559,6 +560,14 @@ hc_attach ()
   hcm->app_index = a->app_index;
   vec_free (a->name);
   hcm->attached = 1;
+
+  clib_memset (ck_pair, 0, sizeof (*ck_pair));
+  ck_pair->cert = (u8 *) test_srv_crt_rsa;
+  ck_pair->key = (u8 *) test_srv_key_rsa;
+  ck_pair->cert_len = test_srv_crt_rsa_len;
+  ck_pair->key_len = test_srv_key_rsa_len;
+  vnet_app_add_cert_key_pair (ck_pair);
+  hcm->ckpair_index = ck_pair->index;
 
   return 0;
 }
@@ -599,6 +608,14 @@ hc_connect ()
     &a->sep_ext, TRANSPORT_ENDPT_EXT_CFG_HTTP, sizeof (http_cfg));
   clib_memcpy (ext_cfg->data, &http_cfg, sizeof (http_cfg));
 
+  if (hcm->connect_sep.flags & SESSION_ENDPT_CFG_F_SECURE)
+    {
+      ext_cfg = session_endpoint_add_ext_cfg (
+	&a->sep_ext, TRANSPORT_ENDPT_EXT_CFG_CRYPTO,
+	sizeof (transport_endpt_crypto_cfg_t));
+      ext_cfg->crypto.ckpair_index = hcm->ckpair_index;
+    }
+
   session_send_rpc_evt_to_thread_force (transport_cl_thread (), hc_connect_rpc,
 					a);
 }
@@ -607,11 +624,11 @@ static void
 hc_get_repeat_stats (vlib_main_t *vm)
 {
   hc_main_t *hcm = &hc_main;
-  hc_worker_t *wrk;
-  hc_session_t *hc_session;
 
-  if (hcm->repeat)
+  if (hcm->repeat || hcm->verbose)
     {
+      hc_worker_t *wrk;
+      hc_session_t *hc_session;
       vec_foreach (wrk, hcm->wrk)
 	{
 	  vec_foreach (hc_session, wrk->sessions)
@@ -625,12 +642,23 @@ hc_get_repeat_stats (vlib_main_t *vm)
 		}
 	    }
 	}
-      vlib_cli_output (vm,
-		       "< %d request(s) in %.6fs\n< avg latency "
-		       "%.4fms\n< %.2f req/sec",
-		       hc_stats.request_count, hc_stats.elapsed_time,
-		       (hc_stats.elapsed_time / hc_stats.request_count) * 1000,
-		       hc_stats.request_count / hc_stats.elapsed_time);
+
+      if (hcm->repeat)
+	{
+	  vlib_cli_output (vm,
+			   "* %d request(s) in %.6fs\n"
+			   "* avg latency %.4fms\n"
+			   "* %.2f req/sec",
+			   hc_stats.request_count, hc_stats.elapsed_time,
+			   (hc_stats.elapsed_time / hc_stats.request_count) *
+			     1000,
+			   hc_stats.request_count / hc_stats.elapsed_time);
+	}
+      else
+	{
+	  vlib_cli_output (vm, "* latency: %.4fms",
+			   hc_stats.elapsed_time * 1000);
+	}
     }
 }
 
@@ -650,23 +678,20 @@ hc_get_event (vlib_main_t *vm)
     event_timeout += 5;
   vlib_process_wait_for_event_or_clock (vm, event_timeout);
   event_type = vlib_process_get_events (vm, &event_data);
+  hc_get_repeat_stats (vm);
 
   switch (event_type)
     {
     case ~0:
-      hc_get_repeat_stats (vm);
       err = clib_error_return (0, "error: timeout");
       break;
     case HC_CONNECT_FAILED:
-      hc_get_repeat_stats (vm);
       err = clib_error_return (0, "error: failed to connect");
       break;
     case HC_TRANSPORT_CLOSED:
-      hc_get_repeat_stats (vm);
       err = clib_error_return (0, "error: transport closed");
       break;
     case HC_GENERIC_ERR:
-      hc_get_repeat_stats (vm);
       err = clib_error_return (0, "error: unknown");
       break;
     case HC_REPLY_RECEIVED:
@@ -678,7 +703,7 @@ hc_get_event (vlib_main_t *vm)
 	    fopen ((char *) format (0, "/tmp/%v", hcm->filename), "a");
 	  if (file_ptr == NULL)
 	    {
-	      vlib_cli_output (vm, "couldn't open file %v", hcm->filename);
+	      vlib_cli_output (vm, "* couldn't open file %v", hcm->filename);
 	    }
 	  else
 	    {
@@ -686,7 +711,7 @@ hc_get_event (vlib_main_t *vm)
 		       hc_session->response_status, hc_session->resp_headers,
 		       hc_session->http_response);
 	      fclose (file_ptr);
-	      vlib_cli_output (vm, "file saved (/tmp/%v)", hcm->filename);
+	      vlib_cli_output (vm, "* file saved (/tmp/%v)", hcm->filename);
 	    }
 	}
       if (hcm->verbose)
@@ -699,10 +724,8 @@ hc_get_event (vlib_main_t *vm)
 	}
       break;
     case HC_REPEAT_DONE:
-      hc_get_repeat_stats (vm);
       break;
     default:
-      hc_get_repeat_stats (vm);
       err = clib_error_return (0, "error: unexpected event %d", event_type);
       break;
     }
@@ -727,6 +750,7 @@ hc_run (vlib_main_t *vm)
     {
       wrk->has_common_headers = false;
       wrk->thread_index = wrk - hcm->wrk;
+      wrk->vlib_main = vlib_get_main_by_index (wrk->thread_index);
       /* 4k for headers should be enough */
       vec_validate (wrk->headers_buf, 4095);
       http_init_headers_ctx (&wrk->req_headers, wrk->headers_buf,
@@ -969,7 +993,7 @@ hc_command_fn (vlib_main_t *vm, unformat_input_t *input,
   hcm->appns_id = appns_id;
 
   if (hcm->repeat)
-    vlib_cli_output (vm, "Running, please wait...");
+    vlib_cli_output (vm, "* Running, please wait...");
 
   session_enable_disable_args_t args = { .is_en = 1,
 					 .rt_engine_type =

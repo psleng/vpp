@@ -268,8 +268,8 @@ fa_acl_match_ip6_addr (ip6_address_t * addr1, ip6_address_t * addr2,
 	}
       if (prefixlen % 8)
 	{
-	  u8 b1 = *((u8 *) addr1 + 1 + prefixlen / 8);
-	  u8 b2 = *((u8 *) addr2 + 1 + prefixlen / 8);
+	  u8 b1 = *((u8 *) addr1 + prefixlen / 8);
+	  u8 b2 = *((u8 *) addr2 + prefixlen / 8);
 	  u8 mask0 = (0xff - ((1 << (8 - (prefixlen % 8))) - 1));
 	  return (b1 & mask0) == b2;
 	}
@@ -715,8 +715,10 @@ acl_plugin_match_5tuple_inline_and_count (void *p_acl_main, u32 lc_index,
                                  r_acl_pos_p, r_acl_match_p, r_rule_match_p, trace_bitmap);
   }
   if (PREDICT_TRUE(ret)) {
-	  u16 thread_index = os_get_thread_index ();
-	  vlib_increment_combined_counter(am->combined_acl_counters + *r_acl_match_p, thread_index, *r_rule_match_p, 1, packet_size);
+    clib_thread_index_t thread_index = os_get_thread_index ();
+    vlib_increment_combined_counter (
+      am->combined_acl_counters + *r_acl_match_p, thread_index,
+      *r_rule_match_p, 1, packet_size);
   }
   return ret;
 }

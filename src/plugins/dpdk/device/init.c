@@ -18,7 +18,7 @@
 #include <vppinfra/format.h>
 #include <vppinfra/bitmap.h>
 #include <vppinfra/linux/sysfs.h>
-#include <vlib/unix/unix.h>
+#include <vlib/file.h>
 #include <vlib/log.h>
 
 #include <vnet/vnet.h>
@@ -390,6 +390,8 @@ dpdk_lib_init (dpdk_main_t * dm)
 	    dpdk_device_flag_set (xd, DPDK_DEVICE_FLAG_INTEL_PHDR_CKSUM, 1);
 	  if (dr->int_unmaskable)
 	    dpdk_device_flag_set (xd, DPDK_DEVICE_FLAG_INT_UNMASKABLE, 1);
+	  if (dr->need_tx_prepare)
+	    dpdk_device_flag_set (xd, DPDK_DEVICE_FLAG_TX_PREPARE, 1);
 	}
       else
 	dpdk_log_warn ("[%u] unknown driver '%s'", port_id, di.driver_name);
@@ -1382,6 +1384,15 @@ dpdk_config (vlib_main_t * vm, unformat_input_t * input)
       tmp = format (0, "--file-prefix%c", 0);
       vec_add1 (conf->eal_init_args, tmp);
       tmp = format (0, "vpp%c", 0);
+      vec_add1 (conf->eal_init_args, tmp);
+    }
+
+  /* Remap main lcore onto DPDK lcore 0 if it exceeds the max lcore index */
+  if (tm->main_lcore >= RTE_MAX_LCORE)
+    {
+      tmp = format (0, "--lcores%c", 0);
+      vec_add1 (conf->eal_init_args, tmp);
+      tmp = format (0, "0@%u%c", tm->main_lcore, 0);
       vec_add1 (conf->eal_init_args, tmp);
     }
 #endif

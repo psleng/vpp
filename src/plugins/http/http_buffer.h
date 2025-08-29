@@ -31,6 +31,7 @@ typedef struct http_buffer_vft_ http_buffer_vft_t;
 typedef struct http_buffer_
 {
   http_buffer_vft_t *vft;
+  http_buffer_type_t type;
   u8 data[HTTP_BUFFER_DATA_SZ];
 } http_buffer_t;
 
@@ -38,9 +39,10 @@ struct http_buffer_vft_
 {
   void (*init) (http_buffer_t *, void *data, u64 len);
   void (*free) (http_buffer_t *);
-  svm_fifo_seg_t *(*get_segs) (http_buffer_t *, u32 max_len, u32 *n_segs);
+  u32 (*get_segs) (http_buffer_t *, u32 max_len, svm_fifo_seg_t **fs,
+		   u32 *n_segs);
   u32 (*drain) (http_buffer_t *, u32 len);
-  u8 (*is_drained) (http_buffer_t *);
+  u64 (*bytes_left) (http_buffer_t *);
 };
 
 void http_buffer_init (http_buffer_t *hb, http_buffer_type_t type,
@@ -53,10 +55,11 @@ http_buffer_free (http_buffer_t *hb)
     hb->vft->free (hb);
 }
 
-static inline svm_fifo_seg_t *
-http_buffer_get_segs (http_buffer_t *hb, u32 max_len, u32 *n_segs)
+static inline u32
+http_buffer_get_segs (http_buffer_t *hb, u32 max_len, svm_fifo_seg_t **fs,
+		      u32 *n_segs)
 {
-  return hb->vft->get_segs (hb, max_len, n_segs);
+  return hb->vft->get_segs (hb, max_len, fs, n_segs);
 }
 
 static inline u32
@@ -65,10 +68,10 @@ http_buffer_drain (http_buffer_t *hb, u32 len)
   return hb->vft->drain (hb, len);
 }
 
-static inline u8
-http_buffer_is_drained (http_buffer_t *hb)
+static inline u64
+http_buffer_bytes_left (http_buffer_t *hb)
 {
-  return hb->vft->is_drained (hb);
+  return hb->vft->bytes_left (hb);
 }
 
 #endif /* SRC_PLUGINS_HTTP_HTTP_BUFFER_H_ */

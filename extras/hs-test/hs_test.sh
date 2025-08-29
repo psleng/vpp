@@ -6,6 +6,7 @@ args=
 focused_test=0
 persist_set=0
 dryrun_set=0
+coverage_set=0
 unconfigure_set=0
 debug_set=0
 leak_check_set=0
@@ -15,6 +16,7 @@ tc_names=()
 skip_names=()
 dryrun=
 no_color=
+perf=
 
 for i in "$@"
 do
@@ -24,6 +26,13 @@ case "${i}" in
         if [ "$persist" = "true" ]; then
             args="$args -persist"
             persist_set=1
+        fi
+        ;;
+    --coverage=*)
+        coverage="${i#*=}"
+        if [ "$coverage" = "true" ]; then
+            args="$args -coverage"
+            coverage_set=1
         fi
         ;;
     --debug=*)
@@ -103,8 +112,20 @@ case "${i}" in
             ginkgo_args="$ginkgo_args --no-color"
         fi
         ;;
+    --perf=*)
+        perf="${i#*=}"
+        ;;
+    --timeout=*)
+        args="$args -timeout ${i#*=}"
+        ;;
 esac
 done
+
+if [ "$perf" = "true" ]; then
+    ginkgo_args="$ginkgo_args --label-filter=Perf"
+else
+    ginkgo_args="$ginkgo_args --label-filter=!Perf"
+fi
 
 if [ ${#tc_names[@]} -gt 1 ]
 then
@@ -138,6 +159,9 @@ if [ $focused_test -eq 0 ] && [ $debug_set -eq 1 ]; then
     echo -e "\e[1;31mVPP debug flag is not supported while running all tests!\e[1;0m"
     exit 2
 fi
+
+sudo_user="${SUDO_USER:-root}"
+args="$args -sudo_user $sudo_user"
 
 if [ $leak_check_set -eq 1 ]; then
   if [ $focused_test -eq 0 ]; then

@@ -1354,7 +1354,7 @@ oct_crypto_aead_session_update (vlib_main_t *vm, oct_crypto_sess_t *sess,
   vnet_crypto_key_t *key = vnet_crypto_get_key (key_index);
   roc_se_cipher_type enc_type = 0;
   roc_se_auth_type auth_type = 0;
-  u32 digest_len = ~0;
+  u32 digest_len = 16;
   i32 rv = 0;
 
   switch (key->alg)
@@ -1366,9 +1366,6 @@ oct_crypto_aead_session_update (vlib_main_t *vm, oct_crypto_sess_t *sess,
       sess->aes_gcm = 1;
       sess->iv_offset = 0;
       sess->iv_length = 16;
-      sess->cpt_ctx.mac_len = 16;
-      sess->cpt_op = type;
-      digest_len = 16;
       break;
     case VNET_CRYPTO_ALG_CHACHA20_POLY1305:
       enc_type = ROC_SE_CHACHA20;
@@ -1380,6 +1377,9 @@ oct_crypto_aead_session_update (vlib_main_t *vm, oct_crypto_sess_t *sess,
 	key->alg, key_index);
       return -1;
     }
+
+  sess->cpt_ctx.mac_len = digest_len;
+  sess->cpt_op = type;
 
   rv = roc_se_ciph_key_set (&sess->cpt_ctx, enc_type, key->data, key->length);
   if (rv)
@@ -1827,7 +1827,7 @@ oct_crypto_enqueue_aead_aad_0_dec (vlib_main_t *vm,
 
 vnet_crypto_async_frame_t *
 oct_crypto_frame_dequeue (vlib_main_t *vm, u32 *nb_elts_processed,
-			  u32 *enqueue_thread_idx)
+			  clib_thread_index_t *enqueue_thread_idx)
 {
   oct_crypto_main_t *ocm = &oct_crypto_main;
   u32 deq_head, status = VNET_CRYPTO_OP_STATUS_COMPLETED;
@@ -1940,7 +1940,7 @@ oct_init_crypto_engine_handlers (vlib_main_t *vm, vnet_dev_t *dev)
 }
 
 int
-oct_conf_sw_queue (vlib_main_t *vm, vnet_dev_t *dev)
+oct_conf_sw_queue (vlib_main_t *vm, vnet_dev_t *dev, oct_crypto_dev_t *ocd)
 {
   oct_crypto_main_t *ocm = &oct_crypto_main;
   vlib_thread_main_t *tm = vlib_get_thread_main ();
@@ -1961,7 +1961,7 @@ oct_conf_sw_queue (vlib_main_t *vm, vnet_dev_t *dev)
    * Each pending queue will get number of cpt desc / number of cores.
    * And that desc count is shared across inflight entries.
    */
-  n_inflight_req = (OCT_CPT_LF_MAX_NB_DESC / tm->n_vlib_mains);
+  n_inflight_req = (ocd->n_desc / tm->n_vlib_mains);
 
   for (i = 0; i < tm->n_vlib_mains; ++i)
     {

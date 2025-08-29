@@ -29,12 +29,15 @@ typedef struct ec_session_
   foreach_app_session_field
 #undef _
     u32 vpp_session_index;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   u64 bytes_to_send;
   u64 bytes_sent;
   u64 bytes_to_receive;
   u64 bytes_received;
   u64 vpp_session_handle;
+  f64 time_to_send;
+  u64 bytes_paced_target;
+  u64 bytes_paced_current;
 } ec_session_t;
 
 typedef struct ec_worker_
@@ -45,7 +48,7 @@ typedef struct ec_worker_
   u32 *conn_indices;		/**< sessions handled by worker */
   u32 *conns_this_batch;	/**< sessions handled in batch */
   svm_msg_q_t *vpp_event_queue; /**< session layer worker mq */
-  u32 thread_index;		/**< thread index for worker */
+  clib_thread_index_t thread_index; /**< thread index for worker */
 } ec_worker_t;
 
 typedef struct
@@ -57,6 +60,7 @@ typedef struct
   volatile u64 rx_total;
   volatile u64 tx_total;
   volatile int run_test; /**< Signal start of test */
+  volatile bool timer_expired; /**< Signal end of timed test */
 
   f64 syn_start_time;
   f64 test_start_time;
@@ -64,6 +68,8 @@ typedef struct
   u32 prev_conns;
   u32 repeats;
 
+  f64
+    pacing_window_len; /**< Time between data chunk sends when limiting tput */
   u32 connect_conn_index; /**< Connects attempted progress */
 
   /*
@@ -88,6 +94,7 @@ typedef struct
   u32 connections_per_batch;		/**< Connections to rx/tx at once */
   u32 private_segment_count;		/**< Number of private fifo segs */
   u64 private_segment_size;		/**< size of private fifo segs */
+  u64 throughput;			/**< Target bytes per second */
   u32 tls_engine;			/**< TLS engine mbedtls/openssl */
   u32 no_copy;				/**< Don't memcpy data to tx fifo */
   u32 quic_streams;			/**< QUIC streams per connection */
@@ -97,6 +104,7 @@ typedef struct
   u64 appns_secret;			/**< App namespace secret */
   f64 syn_timeout;			/**< Test syn timeout (s) */
   f64 test_timeout;			/**< Test timeout (s) */
+  f64 run_time;				/**< Length of a test (s) */
 
   /*
    * Flags

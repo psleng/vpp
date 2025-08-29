@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 )
 
@@ -30,11 +31,11 @@ var vppUdpProxyTests = map[string][]func(s *VppUdpProxySuite){}
 var vppUdpProxySoloTests = map[string][]func(s *VppUdpProxySuite){}
 
 func RegisterVppUdpProxyTests(tests ...func(s *VppUdpProxySuite)) {
-	vppUdpProxyTests[getTestFilename()] = tests
+	vppUdpProxyTests[GetTestFilename()] = tests
 }
 
 func RegisterVppUdpProxySoloTests(tests ...func(s *VppUdpProxySuite)) {
-	vppUdpProxySoloTests[getTestFilename()] = tests
+	vppUdpProxySoloTests[GetTestFilename()] = tests
 }
 
 func (s *VppUdpProxySuite) SetupSuite() {
@@ -62,8 +63,8 @@ func (s *VppUdpProxySuite) SetupTest() {
 	s.AssertNotNil(vpp, fmt.Sprint(err))
 
 	s.AssertNil(vpp.Start())
-	s.AssertNil(vpp.CreateTap(s.Interfaces.Client, 1, 1))
-	s.AssertNil(vpp.CreateTap(s.Interfaces.Server, 1, 2))
+	s.AssertNil(vpp.CreateTap(s.Interfaces.Client, false, 1, 1))
+	s.AssertNil(vpp.CreateTap(s.Interfaces.Server, false, 1, 2))
 
 	s.proxyPort = 8080
 	s.serverPort = 80
@@ -85,13 +86,13 @@ func (s *VppUdpProxySuite) SetupTest() {
 	}
 }
 
-func (s *VppUdpProxySuite) TearDownTest() {
+func (s *VppUdpProxySuite) TeardownTest() {
 	vpp := s.Containers.VppProxy.VppInstance
 	if CurrentSpecReport().Failed() {
 		s.Log(vpp.Vppctl("show session verbose 2"))
 		s.Log(vpp.Vppctl("show error"))
 	}
-	s.HstSuite.TearDownTest()
+	s.HstSuite.TeardownTest()
 }
 
 func (s *VppUdpProxySuite) VppProxyAddr() string {
@@ -168,10 +169,10 @@ var _ = Describe("VppUdpProxySuite", Ordered, ContinueOnFailure, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	for filename, tests := range vppUdpProxyTests {
@@ -197,10 +198,10 @@ var _ = Describe("VppUdpProxySuiteSolo", Ordered, ContinueOnFailure, Serial, fun
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	for filename, tests := range vppUdpProxySoloTests {

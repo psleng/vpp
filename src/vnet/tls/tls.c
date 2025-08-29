@@ -21,7 +21,13 @@
 static tls_main_t tls_main;
 tls_engine_vft_t *tls_vfts;
 
-void tls_disconnect (u32 ctx_handle, u32 thread_index);
+void tls_disconnect (u32 ctx_handle, clib_thread_index_t thread_index);
+
+static const tls_alpn_proto_id_t tls_alpn_proto_ids[] = {
+#define _(sym, str) { (u8) (sizeof (str) - 1), (u8 *) str },
+  foreach_tls_alpn_protos
+#undef _
+};
 
 void
 tls_disconnect_transport (tls_ctx_t * ctx)
@@ -33,6 +39,18 @@ tls_disconnect_transport (tls_ctx_t * ctx)
 
   if (vnet_disconnect_session (&a))
     clib_warning ("disconnect returned");
+}
+
+void
+tls_shutdown_transport (tls_ctx_t *ctx)
+{
+  vnet_shutdown_args_t a = {
+    .handle = ctx->tls_session_handle,
+    .app_index = ctx->ts_app_index,
+  };
+
+  if (vnet_shutdown_session (&a))
+    clib_warning ("shutdown returned");
 }
 
 crypto_engine_type_t
@@ -90,6 +108,46 @@ tls_add_app_q_evt (app_worker_t *app_wrk, session_t *app_session)
 {
   app_worker_add_event (app_wrk, app_session, SESSION_IO_EVT_RX);
   return 0;
+}
+
+tls_alpn_proto_t
+tls_alpn_proto_by_str (tls_alpn_proto_id_t *alpn_id)
+{
+  tls_main_t *tm = &tls_main;
+  uword *p;
+
+  p = hash_get_mem (tm->alpn_proto_by_str, alpn_id);
+  if (p)
+    return p[0];
+
+  return TLS_ALPN_PROTO_NONE;
+}
+
+tls_alpn_proto_t
+tls_get_alpn_selected (u32 ctx_handle)
+{
+  tls_ctx_t *ctx;
+  ctx = tls_ctx_get (ctx_handle);
+  return ctx->alpn_selected;
+}
+
+u8 *
+format_tls_alpn_proto (u8 *s, va_list *args)
+{
+  tls_alpn_proto_t alpn_proto = va_arg (*args, int);
+  u8 *t = 0;
+
+  switch (alpn_proto)
+    {
+#define _(sym, str)                                                           \
+  case TLS_ALPN_PROTO_##sym:                                                  \
+    t = (u8 *) str;                                                           \
+    break;
+      foreach_tls_alpn_protos
+#undef _
+	default : return format (s, "BUG: unknown");
+    }
+  return format (s, "%s", t);
 }
 
 u32
@@ -629,7 +687,9 @@ tls_connect (transport_endpoint_cfg_t * tep)
   tls_ctx_t *ctx;
   u32 ctx_index;
   transport_endpt_ext_cfg_t *ext_cfg;
-  int rv;
+  int rv, i;
+  u8 *p;
+  const tls_alpn_proto_id_t *alpn_proto;
 
   sep = (session_endpoint_cfg_t *) tep;
   ext_cfg = session_endpoint_get_ext_cfg (sep, TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
@@ -662,6 +722,13 @@ tls_connect (transport_endpoint_cfg_t * tep)
       ctx->srv_hostname = format (0, "%s", ccfg->hostname);
       vec_terminate_c_string (ctx->srv_hostname);
     }
+  for (i = 0; i < sizeof (ccfg->alpn_protos) && ccfg->alpn_protos[i]; i++)
+    {
+      alpn_proto = &tls_alpn_proto_ids[ccfg->alpn_protos[i]];
+      vec_add2 (ctx->alpn_list, p, alpn_proto->len + 1);
+      *p++ = alpn_proto->len;
+      clib_memcpy_fast (p, alpn_proto->base, alpn_proto->len);
+    }
 
   ctx->tls_ctx_engine = engine_type;
 
@@ -684,7 +751,20 @@ tls_connect (transport_endpoint_cfg_t * tep)
 }
 
 void
-tls_disconnect (u32 ctx_handle, u32 thread_index)
+tls_shutdown (u32 ctx_handle, clib_thread_index_t thread_index)
+{
+  tls_ctx_t *ctx;
+
+  TLS_DBG (1, "Disconnecting %x", ctx_handle);
+
+  ctx = tls_ctx_get (ctx_handle);
+  ctx->flags |= TLS_CONN_F_APP_CLOSED;
+  ctx->flags |= TLS_CONN_F_SHUTDOWN_TRANSPORT;
+  tls_ctx_app_close (ctx);
+}
+
+void
+tls_disconnect (u32 ctx_handle, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ctx;
 
@@ -712,7 +792,9 @@ tls_start_listen (u32 app_listener_index, transport_endpoint_cfg_t *tep)
   tls_ctx_t *lctx;
   u32 lctx_index;
   transport_endpt_ext_cfg_t *ext_cfg;
-  int rv;
+  int rv, i;
+  u8 *p;
+  const tls_alpn_proto_id_t *alpn_proto;
 
   sep = (session_endpoint_cfg_t *) tep;
   ext_cfg = session_endpoint_get_ext_cfg (sep, TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
@@ -762,6 +844,13 @@ tls_start_listen (u32 app_listener_index, transport_endpoint_cfg_t *tep)
   lctx->ckpair_index = ccfg->ckpair_index;
   lctx->c_s_index = app_listener_index;
   lctx->c_flags |= TRANSPORT_CONNECTION_F_NO_LOOKUP;
+  for (i = 0; i < sizeof (ccfg->alpn_protos) && ccfg->alpn_protos[i]; i++)
+    {
+      alpn_proto = &tls_alpn_proto_ids[ccfg->alpn_protos[i]];
+      vec_add2 (lctx->alpn_list, p, alpn_proto->len + 1);
+      *p++ = alpn_proto->len;
+      clib_memcpy_fast (p, alpn_proto->base, alpn_proto->len);
+    }
 
   if (tls_vfts[engine_type].ctx_start_listen (lctx))
     {
@@ -820,7 +909,7 @@ tls_stop_listen (u32 lctx_index)
 }
 
 transport_connection_t *
-tls_connection_get (u32 ctx_index, u32 thread_index)
+tls_connection_get (u32 ctx_index, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ctx;
   ctx = tls_ctx_get_w_thread (ctx_index, thread_index);
@@ -959,7 +1048,7 @@ u8 *
 format_tls_connection (u8 * s, va_list * args)
 {
   u32 ctx_index = va_arg (*args, u32);
-  u32 thread_index = va_arg (*args, u32);
+  clib_thread_index_t thread_index = va_arg (*args, u32);
   u32 verbose = va_arg (*args, u32);
   tls_ctx_t *ctx;
 
@@ -1013,8 +1102,8 @@ format_tls_half_open (u8 * s, va_list * args)
 }
 
 static void
-tls_transport_endpoint_get (u32 ctx_handle, u32 thread_index,
-			    transport_endpoint_t * tep, u8 is_lcl)
+tls_transport_endpoint_get (u32 ctx_handle, clib_thread_index_t thread_index,
+			    transport_endpoint_t *tep, u8 is_lcl)
 {
   tls_ctx_t *ctx = tls_ctx_get_w_thread (ctx_handle, thread_index);
   session_t *ts;
@@ -1086,6 +1175,7 @@ tls_enable (vlib_main_t * vm, u8 is_en)
 static const transport_proto_vft_t tls_proto = {
   .enable = tls_enable,
   .connect = tls_connect,
+  .half_close = tls_shutdown,
   .close = tls_disconnect,
   .start_listen = tls_start_listen,
   .stop_listen = tls_stop_listen,
@@ -1179,7 +1269,7 @@ dtls_half_open_get (u32 ho_index)
 }
 
 static void
-dtls_cleanup_callback (u32 ctx_index, u32 thread_index)
+dtls_cleanup_callback (u32 ctx_index, clib_thread_index_t thread_index)
 {
   /* No op */
 }
@@ -1243,12 +1333,28 @@ tls_register_engine (const tls_engine_vft_t * vft, crypto_engine_type_t type)
   tls_vfts[type] = *vft;
 }
 
+static uword
+tls_alpn_proto_hash_key_sum (hash_t *h, uword key)
+{
+  tls_alpn_proto_id_t *id = uword_to_pointer (key, tls_alpn_proto_id_t *);
+  return hash_memory (id->base, id->len, 0);
+}
+
+static uword
+tls_alpn_proto_hash_key_equal (hash_t *h, uword key1, uword key2)
+{
+  tls_alpn_proto_id_t *id1 = uword_to_pointer (key1, tls_alpn_proto_id_t *);
+  tls_alpn_proto_id_t *id2 = uword_to_pointer (key2, tls_alpn_proto_id_t *);
+  return id1 && id2 && tls_alpn_proto_id_eq (id1, id2);
+}
+
 static clib_error_t *
 tls_init (vlib_main_t * vm)
 {
   vlib_thread_main_t *vtm = vlib_get_thread_main ();
   tls_main_t *tm = &tls_main;
   u32 num_threads;
+  const tls_alpn_proto_id_t *alpn_proto;
 
   num_threads = 1 /* main thread */  + vtm->n_threads;
 
@@ -1274,7 +1380,18 @@ tls_init (vlib_main_t * vm)
 			       FIB_PROTOCOL_IP4, ~0);
   transport_register_protocol (TRANSPORT_PROTO_DTLS, &dtls_proto,
 			       FIB_PROTOCOL_IP6, ~0);
-  return 0;
+
+  tm->alpn_proto_by_str = hash_create2 (
+    0, sizeof (tls_alpn_proto_id_t), sizeof (uword),
+    tls_alpn_proto_hash_key_sum, tls_alpn_proto_hash_key_equal, 0, 0);
+
+#define _(sym, str)                                                           \
+  alpn_proto = &tls_alpn_proto_ids[TLS_ALPN_PROTO_##sym];                     \
+  hash_set_mem (tm->alpn_proto_by_str, alpn_proto, TLS_ALPN_PROTO_##sym);
+  foreach_tls_alpn_protos
+#undef _
+
+    return 0;
 }
 
 VLIB_INIT_FUNCTION (tls_init);

@@ -71,6 +71,19 @@ set(PLATFORM_SOURCES
 )
 endif()
 
+set(VLIB_LIBS vppinfra svm ${CMAKE_DL_LIBS} ${EPOLL_LIB})
+
+vpp_find_path(LIBIBERTY_INCLUDE_DIR libiberty/demangle.h)
+vpp_find_library(LIBIBERTY_LIB NAMES iberty libiberty)
+
+if (LIBIBERTY_INCLUDE_DIR AND LIBUNWIND_LIB)
+  message(STATUS "libiberty found at ${LIBIBERTY_LIB}")
+  list(APPEND VLIB_LIBS ${LIBIBERTY_LIB})
+  add_definitions(-DHAVE_LIBIBERTY)
+else()
+  message(WARNING "libiberty not found - stack trace demangle disabled")
+endif()
+
 add_vpp_library(vlib
   SOURCES
   buffer.c
@@ -79,6 +92,7 @@ add_vpp_library(vlib
   counter.c
   drop.c
   error.c
+  file.c
   format.c
   handoff_trace.c
   init.c
@@ -104,7 +118,6 @@ add_vpp_library(vlib
   time.c
   trace.c
   unix/cli.c
-  unix/input.c
   unix/main.c
   unix/plugin.c
   unix/util.c
@@ -130,6 +143,7 @@ add_vpp_library(vlib
   dma/dma.h
   error_funcs.h
   error.h
+  file.h
   format_funcs.h
   global_funcs.h
   init.h
@@ -149,6 +163,7 @@ add_vpp_library(vlib
   time.h
   trace_funcs.h
   trace.h
+  tw_funcs.h
   unix/mc_socket.h
   unix/plugin.h
   unix/unix.h
@@ -159,7 +174,7 @@ add_vpp_library(vlib
   API_FILES
   pci/pci_types.api
 
-  LINK_LIBRARIES vppinfra svm ${CMAKE_DL_LIBS} ${EPOLL_LIB}
+  LINK_LIBRARIES ${VLIB_LIBS}
 
   DEPENDS api_headers
 )

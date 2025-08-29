@@ -49,7 +49,7 @@ vcl_mq_epoll_add_api_sock (vcl_worker_t *wrk)
   struct epoll_event e = { 0 };
   int rv;
 
-  e.data.u32 = ~0;
+  e.data.u32 = VCL_EP_SAPIFD_EVT;
   rv = epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD, cs->fd, &e);
   if (rv != EEXIST && rv < 0)
     return -1;
@@ -189,6 +189,55 @@ vcl_worker_cleanup_cb (void *arg)
 }
 
 void
+vcl_worker_detached_start_signal_mq (vcl_worker_t *wrk)
+{
+  /* Generate mq epfd events using pipes to hopefully force
+   * calls into epoll_wait which retries attaching to vpp */
+  if (!wrk->detached_pipefds[0])
+    {
+      if (pipe (wrk->detached_pipefds))
+	{
+	  VDBG (0, "failed to add mq eventfd to mq epoll fd");
+	  exit (1);
+	}
+    }
+
+  struct epoll_event evt = {};
+  evt.events = EPOLLIN;
+  evt.data.u32 = VCL_EP_PIPEFD_EVT;
+  if (epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD, wrk->detached_pipefds[0],
+		 &evt) < 0)
+    {
+      VDBG (0, "failed to add mq eventfd to mq epoll fd");
+      exit (1);
+    }
+
+  int __clib_unused rv;
+  u8 sig = 1;
+  rv = write (wrk->detached_pipefds[1], &sig, 1);
+}
+
+void
+vcl_worker_detached_signal_mq (vcl_worker_t *wrk)
+{
+  int __clib_unused rv;
+  u8 buf;
+  rv = read (wrk->detached_pipefds[0], &buf, 1);
+  rv = write (wrk->detached_pipefds[1], &buf, 1);
+}
+
+void
+vcl_worker_detached_stop_signal_mq (vcl_worker_t *wrk)
+{
+  if (epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_DEL, wrk->detached_pipefds[0], 0) <
+      0)
+    {
+      VDBG (0, "failed to del mq eventfd to mq epoll fd");
+      exit (1);
+    }
+}
+
+void
 vcl_worker_detach_sessions (vcl_worker_t *wrk)
 {
   session_event_t *e;
@@ -201,33 +250,56 @@ vcl_worker_detach_sessions (vcl_worker_t *wrk)
     {
       if (s->session_state == VCL_STATE_LISTEN)
 	{
-	  s->session_state = VCL_STATE_LISTEN_NO_MQ;
+	  s->flags |= VCL_SESSION_F_LISTEN_NO_MQ;
 	  continue;
 	}
-      if ((s->flags & VCL_SESSION_F_IS_VEP) ||
-	  s->session_state == VCL_STATE_LISTEN_NO_MQ ||
-	  s->session_state == VCL_STATE_CLOSED)
+      if ((s->flags & VCL_SESSION_F_IS_VEP))
 	continue;
 
-      hash_set (seg_indices_map, s->tx_fifo->segment_index, 1);
+      /* App closed, vpp detached, free session */
+      if (s->session_state == VCL_STATE_CLOSED)
+	{
+	  vcl_session_free (wrk, s);
+	  continue;
+	}
+
+      /* In other states expect close from app */
+      if (s->session_state == VCL_STATE_READY)
+	{
+	  hash_set (seg_indices_map, s->tx_fifo->segment_index, 1);
+	  vec_add2 (wrk->unhandled_evts_vector, e, 1);
+	  e->event_type = SESSION_CTRL_EVT_DISCONNECTED;
+	  e->session_index = s->session_index;
+	  e->postponed = 1;
+	}
 
       s->session_state = VCL_STATE_DETACHED;
-      vec_add2 (wrk->unhandled_evts_vector, e, 1);
-      e->event_type = SESSION_CTRL_EVT_DISCONNECTED;
-      e->session_index = s->session_index;
-      e->postponed = 1;
+      s->flags |= VCL_SESSION_F_APP_CLOSING;
     }
 
   hash_foreach (seg_index, val, seg_indices_map,
 		({ vec_add1 (seg_indices, seg_index); }));
+
+  /* If multi-threaded apps, wait for all threads to hopefully finish
+   * their blocking operations  */
+  if (wrk->pre_wait_fn)
+    wrk->pre_wait_fn (VCL_INVALID_SESSION_INDEX);
+  sleep (1);
+  if (wrk->post_wait_fn)
+    wrk->post_wait_fn (VCL_INVALID_SESSION_INDEX);
 
   vcl_segment_detach_segments (seg_indices);
 
   /* Detach worker's mqs segment */
   vcl_segment_detach (vcl_vpp_worker_segment_handle (wrk->wrk_index));
 
+  wrk->app_event_queue = 0;
+  wrk->ctrl_mq = 0;
+
   vec_free (seg_indices);
   hash_free (seg_indices_map);
+
+  vcl_worker_detached_start_signal_mq (wrk);
 }
 
 void
@@ -364,8 +436,8 @@ vcl_session_read_ready (vcl_session_t * s)
     }
   else
     {
-      return (s->session_state == VCL_STATE_DISCONNECT) ?
-	VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
+      return (s->session_state == VCL_STATE_DISCONNECT) ? VPPCOM_ECONNRESET :
+							  VPPCOM_ENOTCONN;
     }
 }
 
@@ -772,9 +844,6 @@ vcl_session_state_str (vcl_session_state_t state)
       break;
     case VCL_STATE_UPDATED:
       st = "STATE_UPDATED";
-      break;
-    case VCL_STATE_LISTEN_NO_MQ:
-      st = "STATE_LISTEN_NO_MQ";
       break;
     default:
       st = "UNKNOWN_STATE";

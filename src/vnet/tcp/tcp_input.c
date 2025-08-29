@@ -117,9 +117,9 @@ tcp_handle_rst (tcp_connection_t * tc)
   switch (tc->rst_state)
     {
     case TCP_STATE_SYN_RCVD:
-      /* Cleanup everything. App wasn't notified yet */
-      session_transport_delete_notify (&tc->connection);
-      tcp_connection_cleanup (tc);
+      /* Cleanup everything. App wasn't notified yet, but session layer must be
+       * notified that the session needs to be cleaned up. */
+      tcp_connection_cleanup_and_notify (tc);
       break;
     case TCP_STATE_SYN_SENT:
       session_stream_connect_notify (&tc->connection, SESSION_E_REFUSED);
@@ -498,7 +498,7 @@ tcp_estimate_initial_rtt (tcp_connection_t * tc)
 static void
 tcp_handle_postponed_dequeues (tcp_worker_ctx_t * wrk)
 {
-  u32 thread_index = wrk->vm->thread_index;
+  clib_thread_index_t thread_index = wrk->vm->thread_index;
   u32 *pending_deq_acked;
   tcp_connection_t *tc;
   int i;
@@ -1011,7 +1011,8 @@ tcp_program_disconnect (tcp_worker_ctx_t * wrk, tcp_connection_t * tc)
 static void
 tcp_handle_disconnects (tcp_worker_ctx_t * wrk)
 {
-  u32 thread_index, *pending_disconnects, *pending_resets;
+  clib_thread_index_t thread_index;
+  u32 *pending_disconnects, *pending_resets;
   tcp_connection_t *tc;
   int i;
 
@@ -1172,24 +1173,37 @@ tcp_session_enqueue_ooo (tcp_connection_t * tc, vlib_buffer_t * b,
 static int
 tcp_buffer_discard_bytes (vlib_buffer_t * b, u32 n_bytes_to_drop)
 {
-  u32 discard, first = b->current_length;
-  vlib_main_t *vm = vlib_get_main ();
-
   /* Handle multi-buffer segments */
   if (n_bytes_to_drop > b->current_length)
     {
-      if (!(b->flags & VLIB_BUFFER_NEXT_PRESENT))
+      u32 n_to_drop, first = b->current_length;
+      vlib_main_t *vm = vlib_get_main ();
+
+      if (!(b->flags & VLIB_BUFFER_NEXT_PRESENT) ||
+	  (first + b->total_length_not_including_first_buffer <
+	   n_bytes_to_drop))
 	return -1;
+      b->total_length_not_including_first_buffer -= n_bytes_to_drop - first;
+      n_to_drop = n_bytes_to_drop;
       do
 	{
-	  discard = clib_min (n_bytes_to_drop, b->current_length);
-	  vlib_buffer_advance (b, discard);
+	  /* Not calling vlib_buffer_advance to avoid min chain seg size
+	   * asserts that are not relevant for chained buffers that are about
+	   * to be freed */
+	  if (n_to_drop <= b->current_length)
+	    {
+	      b->current_length -= n_to_drop;
+	      b->current_data += n_to_drop;
+	      break;
+	    }
+	  n_to_drop -= b->current_length;
+	  b->current_data += b->current_length;
+	  b->current_length = 0;
 	  b = vlib_get_buffer (vm, b->next_buffer);
-	  n_bytes_to_drop -= discard;
+	  if (!b)
+	    return -1;
 	}
-      while (n_bytes_to_drop);
-      if (n_bytes_to_drop > first)
-	b->total_length_not_including_first_buffer -= n_bytes_to_drop - first;
+      while (n_to_drop);
     }
   else
     vlib_buffer_advance (b, n_bytes_to_drop);
@@ -1361,10 +1375,9 @@ tcp_established_trace_frame (vlib_main_t * vm, vlib_node_runtime_t * node,
 always_inline int
 tcp_segment_is_exception (tcp_connection_t *tc, tcp_header_t *th)
 {
-  /* TODO(fcoras): tcp-input should not allow segments without one of ack, rst,
-   * syn flags, so we shouldn't be checking for their presence. Leave the check
-   * in for now, remove in due time */
-  ASSERT (th->flags & (TCP_FLAG_ACK | TCP_FLAG_RST | TCP_FLAG_SYN));
+  /* tcp-input allows through segments without ack, e.g., fin without ack,
+   * which have to be handled as exception in nodes like established. So
+   * flags must be checked */
   return !tc || tc->state == TCP_STATE_CLOSED ||
 	 !(th->flags & (TCP_FLAG_ACK | TCP_FLAG_RST | TCP_FLAG_SYN));
 }
@@ -1398,7 +1411,8 @@ always_inline uword
 tcp46_established_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 			  vlib_frame_t * frame, int is_ip4)
 {
-  u32 thread_index = vm->thread_index, n_left_from, *from;
+  clib_thread_index_t thread_index = vm->thread_index;
+  u32 n_left_from, *from;
   tcp_worker_ctx_t *wrk = tcp_get_worker (thread_index);
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
   u16 err_counters[TCP_N_ERROR] = { 0 };
@@ -1883,8 +1897,8 @@ tcp46_syn_sent_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       else
 	new_tc->rcv_wscale = 0;
 
-      new_tc->snd_wnd = clib_net_to_host_u16 (tcp->window)
-			<< new_tc->snd_wscale;
+      /* RFC7323 sec 2.2: Window field in a syn segment must not be scaled */
+      new_tc->snd_wnd = clib_net_to_host_u16 (tcp->window);
       new_tc->snd_wl1 = seq;
       new_tc->snd_wl2 = ack;
 
@@ -2026,7 +2040,7 @@ static void
 tcp46_rcv_process_trace_frame (vlib_main_t *vm, vlib_node_runtime_t *node,
 			       u32 *from, u32 n_bufs)
 {
-  u32 thread_index = vm->thread_index;
+  clib_thread_index_t thread_index = vm->thread_index;
   tcp_connection_t *tc = 0;
   tcp_rx_trace_t *t;
   vlib_buffer_t *b;
@@ -2052,7 +2066,8 @@ always_inline uword
 tcp46_rcv_process_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 			  vlib_frame_t *frame, int is_ip4)
 {
-  u32 thread_index = vm->thread_index, n_left_from, *from, max_deq;
+  clib_thread_index_t thread_index = vm->thread_index;
+  u32 n_left_from, *from, max_deq;
   tcp_worker_ctx_t *wrk = tcp_get_worker (thread_index);
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
 
@@ -2161,8 +2176,7 @@ tcp46_rcv_process_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    {
 	      error = TCP_ERROR_MSG_QUEUE_FULL;
 	      tcp_send_reset (tc);
-	      session_transport_delete_notify (&tc->connection);
-	      tcp_connection_cleanup (tc);
+	      tcp_connection_cleanup_and_notify (tc);
 	      goto drop;
 	    }
 	  error = TCP_ERROR_CONN_ACCEPTED;
@@ -2545,7 +2559,7 @@ tcp46_listen_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 {
   u32 n_left_from, *from, n_syns = 0;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
-  u32 thread_index = vm->thread_index;
+  clib_thread_index_t thread_index = vm->thread_index;
   u32 tw_iss = 0;
 
   from = vlib_frame_vector_args (frame);
@@ -2587,7 +2601,7 @@ tcp46_listen_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  lc = tcp_lookup_listener (b[0], tc->c_fib_index, is_ip4);
 	  /* clean up the old session */
-	  tcp_connection_del (tc);
+	  tcp_connection_cleanup_and_notify (tc);
 	  /* listener was cleaned up */
 	  if (!lc)
 	    {

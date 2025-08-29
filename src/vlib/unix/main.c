@@ -54,6 +54,10 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#ifdef HAVE_LIBIBERTY
+#include <libiberty/demangle.h>
+#endif
+
 /** Default CLI pager limit is not configured in startup.conf */
 #define UNIX_CLI_DEFAULT_PAGER_LIMIT 100000
 
@@ -64,7 +68,6 @@ char *vlib_default_runtime_dir __attribute__ ((weak));
 char *vlib_default_runtime_dir = "vlib";
 
 unix_main_t unix_main;
-clib_file_main_t file_main;
 
 static clib_error_t *
 unix_main_init (vlib_main_t * vm)
@@ -74,10 +77,7 @@ unix_main_init (vlib_main_t * vm)
   return 0;
 }
 
-VLIB_INIT_FUNCTION (unix_main_init) =
-{
-  .runs_before = VLIB_INITS ("unix_input_init"),
-};
+VLIB_INIT_FUNCTION (unix_main_init);
 
 static int
 unsetup_signal_handlers (int sig)
@@ -226,8 +226,20 @@ unix_signal_handler (int signum, siginfo_t * si, ucontext_t * uc)
 	    {
 	      if (color)
 		syslog_msg = format (syslog_msg, ANSI_FG_YELLOW);
-	      syslog_msg =
-		format (syslog_msg, " %s + 0x%x", sf->name, sf->offset);
+#if HAVE_LIBIBERTY
+	      if (strncmp (sf->name, "_Z", 2) == 0)
+		{
+		  char *demangled = cplus_demangle (sf->name, DMGL_AUTO);
+		  syslog_msg = format (syslog_msg, " %s",
+				       demangled ? demangled : sf->name);
+		  if (demangled)
+		    free (demangled);
+		}
+	      else
+#endif
+		syslog_msg = format (syslog_msg, " %s", sf->name);
+
+	      syslog_msg = format (syslog_msg, " + 0x%x", sf->offset);
 	      if (color)
 		syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
 	    }
@@ -374,6 +386,7 @@ unix_config (vlib_main_t * vm, unformat_input_t * input)
   clib_error_t *error = 0;
   gid_t gid;
   int pidfd = -1;
+  int use_current_dir = 0;
 
   /* Defaults */
   um->cli_pager_buffer_limit = UNIX_CLI_DEFAULT_PAGER_LIMIT;
@@ -397,6 +410,8 @@ unix_config (vlib_main_t * vm, unformat_input_t * input)
       else
 	if (unformat (input, "cli-listen %s", &um->cli_listen_socket.config))
 	;
+      else if (unformat (input, "use-current-dir"))
+	use_current_dir = 1;
       else if (unformat (input, "runtime-dir %s", &um->runtime_dir))
 	;
       else if (unformat (input, "cli-line-mode"))
@@ -484,6 +499,13 @@ unix_config (vlib_main_t * vm, unformat_input_t * input)
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);
+    }
+
+  if (use_current_dir)
+    {
+      char cwd[PATH_MAX];
+      if (getcwd (cwd, PATH_MAX))
+	um->runtime_dir = format (um->runtime_dir, "%s", cwd);
     }
 
   if (um->runtime_dir == 0)

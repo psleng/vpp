@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 )
 
@@ -28,10 +29,10 @@ type VethsSuite struct {
 }
 
 func RegisterVethTests(tests ...func(s *VethsSuite)) {
-	vethTests[getTestFilename()] = tests
+	vethTests[GetTestFilename()] = tests
 }
 func RegisterSoloVethTests(tests ...func(s *VethsSuite)) {
-	vethSoloTests[getTestFilename()] = tests
+	vethSoloTests[GetTestFilename()] = tests
 }
 
 func (s *VethsSuite) SetupSuite() {
@@ -84,7 +85,7 @@ func (s *VethsSuite) SetupServerVpp() {
 	serverVpp := s.Containers.ServerVpp.VppInstance
 	s.AssertNil(serverVpp.Start())
 
-	idx, err := serverVpp.createAfPacket(s.Interfaces.Server)
+	idx, err := serverVpp.createAfPacket(s.Interfaces.Server, false)
 	s.AssertNil(err, fmt.Sprint(err))
 	s.AssertNotEqual(0, idx)
 }
@@ -93,7 +94,7 @@ func (s *VethsSuite) setupClientVpp() {
 	clientVpp := s.GetContainerByName("client-vpp").VppInstance
 	s.AssertNil(clientVpp.Start())
 
-	idx, err := clientVpp.createAfPacket(s.Interfaces.Client)
+	idx, err := clientVpp.createAfPacket(s.Interfaces.Client, false)
 	s.AssertNil(err, fmt.Sprint(err))
 	s.AssertNotEqual(0, idx)
 }
@@ -107,11 +108,11 @@ var _ = Describe("VethsSuite", Ordered, ContinueOnFailure, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	// https://onsi.github.io/ginkgo/#dynamically-generating-specs
@@ -138,10 +139,10 @@ var _ = Describe("VethsSuiteSolo", Ordered, ContinueOnFailure, Serial, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	// https://onsi.github.io/ginkgo/#dynamically-generating-specs

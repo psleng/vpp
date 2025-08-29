@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	. "fd.io/hs-test/infra"
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -30,8 +30,10 @@ func TestHst(t *testing.T) {
 		// 30 minute timeout so that the framework won't timeout while debugging
 		TestTimeout = time.Minute * 30
 	} else {
-		TestTimeout = time.Minute * 5
+		TestTimeout = time.Minute * time.Duration(*Timeout)
 	}
+
+	RunningInCi = os.Getenv("BUILD_NUMBER") != ""
 
 	output, err := os.ReadFile("/sys/devices/system/node/online")
 	if err == nil && strings.Contains(string(output), "-") {

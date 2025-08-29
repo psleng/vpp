@@ -31,7 +31,7 @@
 #include <linux/if_tun.h>
 
 #include <vlib/vlib.h>
-#include <vlib/unix/unix.h>
+#include <vlib/file.h>
 
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
@@ -325,15 +325,13 @@ vhost_user_vring_close (vhost_user_intf_t * vui, u32 qid)
 
   if (vring->kickfd_idx != ~0)
     {
-      clib_file_t *uf = pool_elt_at_index (file_main.file_pool,
-					   vring->kickfd_idx);
+      clib_file_t *uf = clib_file_get (&file_main, vring->kickfd_idx);
       clib_file_del (&file_main, uf);
       vring->kickfd_idx = ~0;
     }
   if (vring->callfd_idx != ~0)
     {
-      clib_file_t *uf = pool_elt_at_index (file_main.file_pool,
-					   vring->callfd_idx);
+      clib_file_t *uf = clib_file_get (&file_main, vring->callfd_idx);
       clib_file_del (&file_main, uf);
       vring->callfd_idx = ~0;
     }
@@ -349,7 +347,7 @@ vhost_user_vring_close (vhost_user_intf_t * vui, u32 qid)
   u16 q = vui->vrings[qid].qid;
   u32 queue_index = vui->vrings[qid].queue_index;
   u32 mode = vui->vrings[qid].mode;
-  u32 thread_index = vui->vrings[qid].thread_index;
+  clib_thread_index_t thread_index = vui->vrings[qid].thread_index;
   vhost_user_vring_init (vui, qid);
   vui->vrings[qid].qid = q;
   vui->vrings[qid].queue_index = queue_index;
@@ -367,7 +365,7 @@ vhost_user_if_disconnect (vhost_user_intf_t * vui)
 
   if (vui->clib_file_index != ~0)
     {
-      clib_file_del (&file_main, file_main.file_pool + vui->clib_file_index);
+      clib_file_del_by_index (&file_main, vui->clib_file_index);
       vui->clib_file_index = ~0;
     }
 
@@ -750,8 +748,8 @@ vhost_user_socket_read (clib_file_t * uf)
 	  /* if there is old fd, delete and close it */
 	  if (vui->vrings[q].callfd_idx != ~0)
 	    {
-	      clib_file_t *uf = pool_elt_at_index (file_main.file_pool,
-						   vui->vrings[q].callfd_idx);
+	      clib_file_t *uf =
+		clib_file_get (&file_main, vui->vrings[q].callfd_idx);
 	      clib_file_del (&file_main, uf);
 	      vui->vrings[q].callfd_idx = ~0;
 	    }
@@ -823,8 +821,8 @@ vhost_user_socket_read (clib_file_t * uf)
 
       if (vui->vrings[q].kickfd_idx != ~0)
 	{
-	  clib_file_t *uf = pool_elt_at_index (file_main.file_pool,
-					       vui->vrings[q].kickfd_idx);
+	  clib_file_t *uf =
+	    clib_file_get (&file_main, vui->vrings[q].kickfd_idx);
 	  clib_file_del (&file_main, uf);
 	  vui->vrings[q].kickfd_idx = ~0;
 	}
@@ -1148,7 +1146,7 @@ vhost_user_socksvr_accept_ready (clib_file_t * uf)
     {
       vu_log_debug (vui, "Close client socket for vhost interface %d, fd %d",
 		    vui->sw_if_index, UNIX_GET_FD (vui->clib_file_index));
-      clib_file_del (&file_main, file_main.file_pool + vui->clib_file_index);
+      clib_file_del_by_index (&file_main, vui->clib_file_index);
     }
 
   vu_log_debug (vui, "New client socket for vhost interface %d, fd %d",
@@ -1408,8 +1406,7 @@ vhost_user_term_if (vhost_user_intf_t * vui)
   if (vui->unix_server_index != ~0)
     {
       //Close server socket
-      clib_file_t *uf = pool_elt_at_index (file_main.file_pool,
-					   vui->unix_server_index);
+      clib_file_t *uf = clib_file_get (&file_main, vui->unix_server_index);
       clib_file_del (&file_main, uf);
       vui->unix_server_index = ~0;
       unlink (vui->sock_filename);
@@ -1444,7 +1441,7 @@ vhost_user_delete_if (vnet_main_t * vnm, vlib_main_t * vm, u32 sw_if_index)
     vhost_user_vring_t *txvq = &vui->vrings[qid];
 
     if ((txvq->mode == VNET_HW_IF_RX_MODE_POLLING) &&
-	(txvq->thread_index != ~0))
+	(txvq->thread_index != CLIB_INVALID_THREAD_INDEX))
       {
 	vhost_cpu_t *cpu = vec_elt_at_index (vum->cpus, txvq->thread_index);
 	ASSERT (cpu->polling_q_count != 0);

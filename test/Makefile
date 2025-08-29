@@ -74,10 +74,10 @@ V=0
 endif
 
 PYTHON_VERSION=$(shell $(PYTHON_INTERP) -c 'import sys; print(sys.version_info.major)')
-PIP_VERSION=24.2
+PIP_VERSION=25.0.1
 # Keep in sync with requirements.txt
 PIP_TOOLS_VERSION=7.4.1
-PIP_SETUPTOOLS_VERSION=71.1.0
+PIP_SETUPTOOLS_VERSION=75.3.0
 PYTHON_DEPENDS=requirements-$(PYTHON_VERSION).txt
 SCAPY_SOURCE=$(shell find $(VENV_PATH)/lib/python* -name site-packages)
 SCAPY_VERSION=$(shell grep scapy $(TEST_DIR)/requirements.txt | cut -d'=' -f3 | cut -d';' -f1)
@@ -276,7 +276,7 @@ endif
 
 EXTRA_ARGS=$(ARG0) $(ARG1) $(ARG2) $(ARG3) $(ARG4) $(ARG5) $(ARG6) $(ARG7) $(ARG8) $(ARG9) $(ARG10) $(ARG11) $(ARG12) $(ARG13) $(ARG14) $(ARG15) $(ARG16) $(ARG17) $(ARG18) $(ARG19)
 
-RUN_TESTS_ARGS=--failed-dir=$(FAILED_DIR) --verbose=$(V) --jobs=$(TEST_JOBS) --filter=$(TEST) --retries=$(RETRIES) --venv-dir=$(VENV_PATH) --vpp-ws-dir=$(WS_ROOT) --vpp-tag=$(TAG) --rnd-seed=$(RND_SEED) --vpp-worker-count="$(VPP_WORKER_COUNT)" --keep-pcaps $(PLUGIN_PATH_ARGS) $(EXC_PLUGINS_ARG) $(TEST_PLUGIN_PATH_ARGS) $(EXTRA_ARGS)
+RUN_TESTS_ARGS=--failed-dir=$(FAILED_DIR) --verbose=$(V) --jobs=$(TEST_JOBS) --filter=$(TEST) --skip-filter=$(SKIP_TESTS) --retries=$(RETRIES) --venv-dir=$(VENV_PATH) --vpp-ws-dir=$(WS_ROOT) --vpp-tag=$(TAG) --rnd-seed=$(RND_SEED) --vpp-worker-count="$(VPP_WORKER_COUNT)" --keep-pcaps $(PLUGIN_PATH_ARGS) $(EXC_PLUGINS_ARG) $(TEST_PLUGIN_PATH_ARGS) $(EXTRA_ARGS)
 RUN_SCRIPT_ARGS=--python-opts=$(PYTHON_OPTS)
 
 define retest-func
@@ -362,9 +362,8 @@ COV_REM_DRIVERS="*rdma*" "*/plugins/af_packet/*" "*/plugins/af_xdp/*" \
 				"*/plugins/perfmon/intel/*" "*/vlib/vmbus/*" \
 				"*/vnet/dev/*" "*/plugins/dev_ena/*" "*/plugins/dev_iavf/*"
 
-COV_REM_UNUSED_FEAT="*/plugins/ioam/analyse/*" "*/plugins/ioam/lib-*/*" \
-				    "*/plugins/ioam/export-common/*" "*/vnet/srp/*" \
-					"*/lawful-intercept/*" "*/lisp/*" "*/vnet/osi/*" \
+COV_REM_UNUSED_FEAT="*/vnet/srp/*" \
+					"*/lawful-intercept/*" "*/lisp/*" "*/plugins/osi/*" \
 					"*/plugins/nsh/*"
 
 COV_REM_TODO_NO_TEST="*/vpp-api/client/*" "*/plugins/prom/*" \
@@ -387,25 +386,46 @@ COV_REM_TODO_NO_TEST="*/vpp-api/client/*" "*/plugins/prom/*" \
 					 "*/vnet/dpo/classify_dpo.h" "*/vnet/dpo/l3_proxy_dpo.h" \
 					 "*/vnet/ipsec/esp_format.c" "*/vnet/ethernet/sfp.c" \
 					 "*/vnet/ethernet/ethernet_format_fns.h" \
-					 "*/plugins/ikev2/ikev2_format.c" "*/vnet/bier/bier_types.c"
+					 "*/plugins/ikev2/ikev2_format.c" "*/vnet/bier/bier_types.c" \
+					 "*/plugins/ioam/*" "*/plugins/vxlan-gpe/*" "*/plugins/ioam/*" \
+					 "*/plugins/hsi/*" "*/api/api_format.c" "*/*/api.c" "*/*/*_api.c" \
+					 "*/plugins/http/http2/*" "*/plugins/http_static/*" "*/plugins/hs_apps/*"
+ifeq ($(HS_TEST),1)
+COV_REM_HST_UNUSED_FEAT= "*/plugins/ping/*" "*/plugins/unittest/mpcap_node.c" "*/vnet/bfd/*" \
+			                 "*/vnet/bier/*" "*/vnet/bonding/*" "*/vnet/classify/*" \
+					 "*/vnet/gso/*" "*/vnet/ipfix-export/*" "*/vnet/ipip/*" \
+					 "*/vnet/ipsec/*" "*/vnet/l2/*" "*/vnet/mpls/*" \
+					 "*/vnet/pg/*" "*/vnet/policer/*" "*/vnet/snap/*" \
+					 "*/vnet/span/*" "*/vnet/srv6/*" "*/vnet/teib/*" \
+					 "*/vnet/tunnel/*" "*/vpp-api/vapi/*" "*/vpp/app/vpe_cli.c" \
+					 "*/vppinfra/pcap.c" "*/vppinfra/pcap_funcs.h"
+endif
+
+LCOV_VERSION=$(shell lcov --version | sed -E 's/^lcov: LCOV version ([0-9]+)[.].*/\1/')
+LCOV_IGNORE_ERRORS=
+ifeq ($(LCOV_VERSION),2)
+LCOV_IGNORE_ERRORS=--ignore-errors unused,empty,mismatch,gcov,negative
+endif
 
 .PHONY: cov-post
 cov-post: wipe-cov $(BUILD_COV_DIR)
-	@lcov --ignore-errors unused,empty,mismatch,gcov --capture \
+	@lcov $(LCOV_IGNORE_ERRORS) --capture \
 		--directory $(VPP_BUILD_DIR) \
 		--output-file $(BUILD_COV_DIR)/coverage$(HS_TEST).info
 	@test -z "$(EXTERN_COV_DIR)" || \
-		lcov --ignore-errors unused,empty,mismatch,gcov --capture \
+		lcov $(LCOV_IGNORE_ERRORS) --capture \
 		--directory $(EXTERN_COV_DIR) \
 		--output-file $(BUILD_COV_DIR)/extern-coverage$(HS_TEST).info
-	@lcov --ignore-errors unused,empty,mismatch,gcov --remove $(BUILD_COV_DIR)/coverage$(HS_TEST).info \
+	@lcov $(LCOV_IGNORE_ERRORS) --remove $(BUILD_COV_DIR)/coverage$(HS_TEST).info \
 		$(COV_REM_NOT_CODE) \
 		$(COV_REM_DRIVERS)  \
 		$(COV_REM_TODO_NO_TEST) \
 		$(COV_REM_UNUSED_FEAT) \
+		$(COV_REM_HST_UNUSED_FEAT) \
 		-o $(BUILD_COV_DIR)/coverage-filtered$(HS_TEST).info
 	@genhtml $(BUILD_COV_DIR)/coverage-filtered$(HS_TEST).info \
 		--output-directory $(BUILD_COV_DIR)/html
+	@rm -f $(BUILD_COV_DIR)/html/cmd_line
 	@test -z "$(EXTERN_COV_DIR)" || \
 		genhtml $(BUILD_COV_DIR)/extern-coverage$(HS_TEST).info \
 			--output-directory $(BUILD_COV_DIR)/extern-html
@@ -593,6 +613,12 @@ help:
 	@echo "                    select all test functions in test_bfd.py,"
 	@echo "                    test_ip4.py and all test functions named"
 	@echo "                    'test_icmp_error' in all files"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   SKIP_TESTS=<filter>,[<filter>],..."
+	@echo "       Skip tests matching one or more comma-delimited"
+	@echo "       filter expressions, even if they were selected by TEST"
+	@echo ""
 	@echo "       (default: '')"
 	@echo ""
 	@echo "   VARIANT=<variant>"

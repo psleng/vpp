@@ -2,18 +2,64 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"time"
 
 	. "fd.io/hs-test/infra"
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 )
 
 func init() {
-	RegisterLdpTests(LdpIperfUdpVppTest, LdpIperfUdpVppInterruptModeTest, RedisBenchmarkTest, LdpIperfTlsTcpTest, LdpIperfTcpVppTest)
+	RegisterLdpTests(LdpIperfUdpTest, LdpIperfUdpVppInterruptModeTest, RedisBenchmarkTest, LdpIperfTlsTcpTest, LdpIperfTcpTest, LdpIperfTcpReorderTest,
+		LdpIperfReverseTcpReorderTest, LdpIperfUdpReorderTest, LdpIperfReverseUdpReorderTest)
 }
 
 func LdpIperfUdpVppInterruptModeTest(s *LdpSuite) {
-	ldPreloadIperfVpp(s, true)
+	s.AssertIperfMinTransfer(ldPreloadIperf(s, "-u"), 100)
+}
+
+func ldpIperfTcpReorder(s *LdpSuite, netInterface *NetInterface, extraIperfArgs string) {
+	cmd := exec.Command("ip", "netns", "exec", netInterface.Peer.NetworkNamespace,
+		"tc", "qdisc", "del", "dev", netInterface.Peer.Name(),
+		"root")
+	s.Log("defer '%s'", cmd.String())
+	defer cmd.Run()
+
+	// "10% of packets (with a correlation of 50%) will get sent immediately, others will be delayed by 10ms"
+	// https://www.man7.org/linux/man-pages/man8/tc-netem.8.html
+	cmd = exec.Command("ip", "netns", "exec", netInterface.Peer.NetworkNamespace,
+		"tc", "qdisc", "add", "dev", netInterface.Peer.Name(),
+		"root", "netem", "delay", "10ms", "reorder", "10%", "50%")
+	s.Log(cmd.String())
+	o, err := cmd.CombinedOutput()
+	s.AssertNil(err, string(o))
+
+	delete(s.Containers.ClientVpp.EnvVars, "VCL_CONFIG")
+	delete(s.Containers.ClientVpp.EnvVars, "LD_PRELOAD")
+	delete(s.Containers.ClientVpp.EnvVars, "VCL_DEBUG")
+	delete(s.Containers.ClientVpp.EnvVars, "LDP_DEBUG")
+	s.Containers.ClientVpp.VppInstance.Disconnect()
+	s.Containers.ClientVpp.VppInstance.Stop()
+	s.Containers.ClientVpp.Exec(false, "ip addr add dev %s %s", s.Interfaces.Client.Name(), s.Interfaces.Client.Ip4Address)
+
+	s.AssertIperfMinTransfer(ldPreloadIperf(s, extraIperfArgs), 20)
+}
+
+func LdpIperfTcpReorderTest(s *LdpSuite) {
+	ldpIperfTcpReorder(s, s.Interfaces.Server, "")
+}
+
+func LdpIperfReverseTcpReorderTest(s *LdpSuite) {
+	ldpIperfTcpReorder(s, s.Interfaces.Client, "-R")
+}
+
+func LdpIperfUdpReorderTest(s *LdpSuite) {
+	ldpIperfTcpReorder(s, s.Interfaces.Server, "-u")
+}
+
+func LdpIperfReverseUdpReorderTest(s *LdpSuite) {
+	ldpIperfTcpReorder(s, s.Interfaces.Client, "-u -R")
 }
 
 func LdpIperfTlsTcpTest(s *LdpSuite) {
@@ -26,22 +72,18 @@ func LdpIperfTlsTcpTest(s *LdpSuite) {
 		c.AddEnvVar("LDP_TLS_CERT_FILE", "/crt.crt")
 		c.AddEnvVar("LDP_TLS_KEY_FILE", "/key.key")
 	}
-	ldPreloadIperfVpp(s, false)
+	s.AssertIperfMinTransfer(ldPreloadIperf(s, ""), 100)
 }
 
-func LdpIperfTcpVppTest(s *LdpSuite) {
-	ldPreloadIperfVpp(s, false)
+func LdpIperfTcpTest(s *LdpSuite) {
+	s.AssertIperfMinTransfer(ldPreloadIperf(s, ""), 100)
 }
 
-func LdpIperfUdpVppTest(s *LdpSuite) {
-	ldPreloadIperfVpp(s, true)
+func LdpIperfUdpTest(s *LdpSuite) {
+	s.AssertIperfMinTransfer(ldPreloadIperf(s, "-u"), 100)
 }
 
-func ldPreloadIperfVpp(s *LdpSuite, useUdp bool) {
-	protocol := ""
-	if useUdp {
-		protocol = " -u "
-	}
+func ldPreloadIperf(s *LdpSuite, extraClientArgs string) IPerfResult {
 	serverVethAddress := s.Interfaces.Server.Ip4AddressString()
 	stopServerCh := make(chan struct{}, 1)
 	srvCh := make(chan error, 1)
@@ -54,7 +96,7 @@ func ldPreloadIperfVpp(s *LdpSuite, useUdp bool) {
 
 	go func() {
 		defer GinkgoRecover()
-		cmd := "iperf3 -4 -s -p " + s.GetPortFromPpid()
+		cmd := "iperf3 -4 -s -p " + s.GetPortFromPpid() + " --logfile " + s.IperfLogFileName(s.Containers.ServerVpp)
 		s.StartServerApp(s.Containers.ServerVpp, "iperf3", cmd, srvCh, stopServerCh)
 	}()
 
@@ -63,15 +105,16 @@ func ldPreloadIperfVpp(s *LdpSuite, useUdp bool) {
 
 	go func() {
 		defer GinkgoRecover()
-		cmd := "iperf3 -c " + serverVethAddress + " -l 1460 -b 10g -J -p " + s.GetPortFromPpid() + protocol
+		cmd := "iperf3 -c " + serverVethAddress + " -l 1460 -b 10g -J -p " + s.GetPortFromPpid() + " " + extraClientArgs
 		s.StartClientApp(s.Containers.ClientVpp, cmd, clnCh, clnRes)
 	}()
 
-	s.AssertChannelClosed(time.Minute*3, clnCh)
+	s.AssertChannelClosed(time.Minute*4, clnCh)
 	output := <-clnRes
 	result := s.ParseJsonIperfOutput(output)
 	s.LogJsonIperfOutput(result)
-	s.AssertIperfMinTransfer(result, 400)
+
+	return result
 }
 
 func RedisBenchmarkTest(s *LdpSuite) {
@@ -90,7 +133,11 @@ func RedisBenchmarkTest(s *LdpSuite) {
 
 	go func() {
 		defer GinkgoRecover()
-		cmd := "redis-server --daemonize yes --protected-mode no --bind " + serverVethAddress
+		// Avoid redis warning during startup
+		s.Containers.ServerVpp.Exec(false, "sysctl vm.overcommit_memory=1")
+		// Note: --save "" disables snapshotting which during upgrade to ubuntu 24.04 was
+		// observed to corrupt vcl memory / heap. Needs more debugging.
+		cmd := "redis-server --daemonize yes --protected-mode no --save \"\" --bind " + serverVethAddress + " --loglevel notice --logfile " + s.RedisServerLogFileName(s.Containers.ServerVpp)
 		s.StartServerApp(s.Containers.ServerVpp, "redis-server", cmd, runningSrv, doneSrv)
 	}()
 

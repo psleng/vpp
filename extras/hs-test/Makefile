@@ -61,6 +61,10 @@ ifeq ($(NO_COLOR),)
 VERBOSE=false
 endif
 
+ifeq ($(TIMEOUT),)
+TIMEOUT=5
+endif
+
 FORCE_BUILD?=true
 
 .PHONY: help
@@ -69,13 +73,16 @@ help:
 	@echo " test                     - run tests"
 	@echo " test-debug               - run tests (vpp debug image)"
 	@echo " test-leak                - run memory leak tests (vpp debug image)"
+	@echo " test-perf                - run performance tests (requires a running cluster)"
 	@echo " build                    - build test infra"
 	@echo " build-cov                - coverage build of VPP and Docker images"
 	@echo " build-debug              - build test infra (vpp debug image)"
 	@echo " build-go                 - just build golang files"
+	@echo " setup-cluster            - setup KinD cluster for performance testing"
 	@echo " checkstyle-go            - check style of .go source files"
 	@echo " fixstyle-go              - format .go source files"
-	@echo " cleanup-hst              - stops and removes all docker contaiers and namespaces"
+	@echo " cleanup-hst              - removes all docker containers and namespaces from last test run"
+	@echo " cleanup-perf             - removes all kubernetes pods and namespaces from last test run"
 	@echo " list-tests               - list all tests"
 	@echo
 	@echo "'make build' and 'make test' arguments:"
@@ -96,6 +103,7 @@ help:
 	@echo " CPU0=[true|false]        - use cpu0"
 	@echo " DRYRUN=[true|false]      - set up containers but don't run tests"
 	@echo " NO_COLOR=[true|false]    - disables colorful Docker and Ginkgo output"
+	@echo " TIMEOUT=[minutes]        - test timeout override (5 minutes by default)"
 
 .PHONY: list-tests
 list-tests:
@@ -129,7 +137,7 @@ test: .deps.ok .build.ok
 	@bash ./hs_test.sh --persist=$(PERSIST) --verbose=$(VERBOSE) \
 		--unconfigure=$(UNCONFIGURE) --debug=$(DEBUG) --test=$(TEST) --cpus=$(CPUS) \
 		--vppsrc=$(VPPSRC) --parallel=$(PARALLEL) --repeat=$(REPEAT) --cpu0=$(CPU0) \
-		--dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR); \
+		--dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR) --timeout=$(TIMEOUT); \
 		./script/compress.sh $$?
 
 .PHONY: test-debug
@@ -138,7 +146,7 @@ test-debug: .deps.ok .build_debug.ok
 	@bash ./hs_test.sh --persist=$(PERSIST) --verbose=$(VERBOSE) \
 		--unconfigure=$(UNCONFIGURE) --debug=$(DEBUG) --test=$(TEST) --cpus=$(CPUS) \
 		--vppsrc=$(VPPSRC) --parallel=$(PARALLEL) --repeat=$(REPEAT) --debug_build=true \
-		--cpu0=$(CPU0) --dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR); \
+		--cpu0=$(CPU0) --dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR) --timeout=$(TIMEOUT); \
 		./script/compress.sh $$?
 
 .PHONY: wipe-lcov
@@ -148,15 +156,28 @@ wipe-lcov:
 .PHONY: test-cov
 test-cov: FORCE_BUILD=false
 test-cov: .deps.ok .build.cov.ok wipe-lcov
-	@bash ./hs_test.sh --persist=$(PERSIST) --verbose=$(VERBOSE) \
+	@bash ./hs_test.sh --coverage=true --persist=$(PERSIST) --verbose=$(VERBOSE) \
 		--unconfigure=$(UNCONFIGURE) --debug=$(DEBUG) --test=$(TEST-HS) --cpus=$(CPUS) \
-		--vppsrc=$(VPPSRC) --cpu0=$(CPU0) --dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR); \
+		--vppsrc=$(VPPSRC) --cpu0=$(CPU0) --dryrun=$(DRYRUN) --skip=$(SKIP) --no_color=$(NO_COLOR) \
+		--timeout=$(TIMEOUT); \
 		./script/compress.sh $$?
 	$(MAKE) -C ../.. test-cov-post-standalone HS_TEST=1
 
 .PHONY: test-leak
 test-leak: .deps.ok .build_debug.ok
-	@bash ./hs_test.sh --test=$(TEST) --debug_build=true --leak_check=true --vppsrc=$(VPPSRC)
+	@bash ./hs_test.sh --test=$(TEST) --debug_build=true --leak_check=true --vppsrc=$(VPPSRC) --timeout=$(TIMEOUT)
+
+.PHONY: test-perf
+test-perf: FORCE_BUILD=false
+test-perf: .deps.ok .build.ok
+	@bash ./hs_test.sh --persist=$(PERSIST) --verbose=$(VERBOSE) \
+		--test=$(TEST) --vppsrc=$(VPPSRC) --repeat=$(REPEAT) \
+		--skip=$(SKIP) --no_color=$(NO_COLOR) --perf=true; \
+		./script/compress.sh $$?
+
+.PHONY: setup-cluster
+setup-cluster:
+	@bash ./kubernetes/setupCluster.sh
 
 .PHONY: build-go
 build-go:
@@ -245,12 +266,29 @@ cleanup-hst:
 	@echo "****************************"
 	@echo "Removing IP address files:"
 	@find . -type f -regextype egrep -regex '.*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' -exec sudo rm -v {} \;
+	@find . -type f -name "fd00:0*" -exec sudo rm -v {} \;
 	@echo "****************************"
 	@echo "Removing network namespaces:"
 	@for ns in $$(ip netns list | grep $$(cat .last_hst_ppid) | awk '{print $$1}'); do \
 		echo $$ns; \
     	sudo ip netns delete $$ns; \
 	done
+	@echo "****************************"
+	@echo "Done."
+	@echo "****************************"
+
+.PHONY: cleanup-perf
+cleanup-perf:
+	@if [ ! -f ".last_hst_ppid" ]; then \
+		echo "'.last_hst_ppid' file does not exist."; \
+		exit 1; \
+	fi
+	@echo "****************************"
+	@echo "Removing kubernetes pods:"
+	@kubectl delete pods --all --grace-period=0 -n namespace$$(cat .last_hst_ppid)
+	@echo "****************************"
+	@echo "Removing kubernetes namespace:"
+	@kubectl delete namespace namespace$$(cat .last_hst_ppid)
 	@echo "****************************"
 	@echo "Done."
 	@echo "****************************"

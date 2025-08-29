@@ -197,7 +197,7 @@ VLIB_NODE_FN (bond_input_node) (vlib_main_t * vm,
 				vlib_node_runtime_t * node,
 				vlib_frame_t * frame)
 {
-  u16 thread_index = vm->thread_index;
+  clib_thread_index_t thread_index = vm->thread_index;
   u32 *from, n_left;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
   u32 sw_if_indices[VLIB_FRAME_SIZE], *sw_if_index;
@@ -414,9 +414,14 @@ VLIB_REGISTER_NODE (bond_input_node) = {
 
 VLIB_INIT_FUNCTION (bond_input_init);
 
-VNET_FEATURE_INIT (bond_input, static) =
-{
+VNET_FEATURE_INIT (bond_input_device, static) = {
   .arc_name = "device-input",
+  .node_name = "bond-input",
+  .runs_before = VNET_FEATURES ("ethernet-input"),
+};
+
+VNET_FEATURE_INIT (bond_input_rx, static) = {
+  .arc_name = "port-rx-eth",
   .node_name = "bond-input",
   .runs_before = VNET_FEATURES ("ethernet-input"),
 };

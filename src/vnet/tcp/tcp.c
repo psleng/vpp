@@ -283,10 +283,10 @@ tcp_connection_cleanup (tcp_connection_t * tc)
  * just remove the connection, call tcp_connection_cleanup instead.
  */
 void
-tcp_connection_del (tcp_connection_t * tc)
+tcp_connection_cleanup_and_notify (tcp_connection_t *tc)
 {
-  session_transport_delete_notify (&tc->connection);
-  tcp_connection_cleanup (tc);
+  tcp_connection_timers_reset (tc);
+  session_transport_delete_request (&tc->connection, tcp_connection_cleanup);
 }
 
 tcp_connection_t *
@@ -356,11 +356,10 @@ tcp_program_cleanup (tcp_worker_ctx_t * wrk, tcp_connection_t * tc)
  * If at the end the connection is not in CLOSED state, it is not removed.
  * Instead, we rely on on TCP to advance through state machine to either
  * 1) LAST_ACK (passive close) whereby when the last ACK is received
- * tcp_connection_del is called. This notifies session of the delete and
- * calls cleanup.
- * 2) TIME_WAIT (active close) whereby after 2MSL the 2MSL timer triggers
- * and cleanup is called.
- *
+ * tcp_connection_cleanup_and_notify is called. This notifies session of the
+ * delete and calls cleanup.
+ * 2) TIME_WAIT (active close) whereby after 2MSL the 2MSL timer triggers and
+ * cleanup is called.
  */
 void
 tcp_connection_close (tcp_connection_t * tc)
@@ -432,7 +431,7 @@ tcp_connection_close (tcp_connection_t * tc)
 }
 
 static void
-tcp_session_half_close (u32 conn_index, u32 thread_index)
+tcp_session_half_close (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_worker_ctx_t *wrk;
   tcp_connection_t *tc;
@@ -456,7 +455,7 @@ tcp_session_half_close (u32 conn_index, u32 thread_index)
 }
 
 static void
-tcp_session_close (u32 conn_index, u32 thread_index)
+tcp_session_close (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_connection_t *tc;
   tc = tcp_connection_get (conn_index, thread_index);
@@ -464,7 +463,7 @@ tcp_session_close (u32 conn_index, u32 thread_index)
 }
 
 static void
-tcp_session_cleanup (u32 conn_index, u32 thread_index)
+tcp_session_cleanup (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_connection_t *tc;
   tc = tcp_connection_get (conn_index, thread_index);
@@ -487,7 +486,7 @@ tcp_session_cleanup_ho (u32 conn_index)
 }
 
 static void
-tcp_session_reset (u32 conn_index, u32 thread_index)
+tcp_session_reset (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_connection_t *tc;
   tc = tcp_connection_get (conn_index, thread_index);
@@ -856,7 +855,7 @@ static u8 *
 format_tcp_session (u8 * s, va_list * args)
 {
   u32 tci = va_arg (*args, u32);
-  u32 thread_index = va_arg (*args, u32);
+  clib_thread_index_t thread_index = va_arg (*args, u32);
   u32 verbose = va_arg (*args, u32);
   tcp_connection_t *tc;
 
@@ -906,7 +905,7 @@ format_tcp_half_open_session (u8 * s, va_list * args)
 }
 
 static transport_connection_t *
-tcp_session_get_transport (u32 conn_index, u32 thread_index)
+tcp_session_get_transport (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_connection_t *tc = tcp_connection_get (conn_index, thread_index);
   if (PREDICT_FALSE (!tc))
@@ -1016,8 +1015,8 @@ tcp_get_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
 }
 
 static int
-tcp_session_attribute (u32 conn_index, u32 thread_index, u8 is_get,
-		       transport_endpt_attr_t *attr)
+tcp_session_attribute (u32 conn_index, clib_thread_index_t thread_index,
+		       u8 is_get, transport_endpt_attr_t *attr)
 {
   tcp_connection_t *tc = tcp_connection_get (conn_index, thread_index);
 
@@ -1279,7 +1278,7 @@ tcp_dispatch_pending_timers (tcp_worker_ctx_t * wrk)
 static void
 tcp_handle_cleanups (tcp_worker_ctx_t * wrk, clib_time_type_t now)
 {
-  u32 thread_index = wrk->vm->thread_index;
+  clib_thread_index_t thread_index = wrk->vm->thread_index;
   tcp_cleanup_req_t *req;
   tcp_connection_t *tc;
 
@@ -1292,8 +1291,7 @@ tcp_handle_cleanups (tcp_worker_ctx_t * wrk, clib_time_type_t now)
       tc = tcp_connection_get (req->connection_index, thread_index);
       if (PREDICT_FALSE (!tc))
 	continue;
-      session_transport_delete_notify (&tc->connection);
-      tcp_connection_cleanup (tc);
+      tcp_connection_cleanup_and_notify (tc);
     }
 }
 
@@ -1404,7 +1402,8 @@ tcp_reschedule (tcp_connection_t * tc)
 static void
 tcp_expired_timers_dispatch (u32 * expired_timers)
 {
-  u32 thread_index = vlib_get_thread_index (), n_left, max_per_loop;
+  clib_thread_index_t thread_index = vlib_get_thread_index (), n_left,
+		      max_per_loop;
   u32 connection_index, timer_id, n_expired, max_loops;
   tcp_worker_ctx_t *wrk;
   tcp_connection_t *tc;

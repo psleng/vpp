@@ -39,6 +39,7 @@
 
 #include <vlib/vlib.h>
 #include <vlib/stats/stats.h>
+#include <vlib/file.h>
 #include <vlib/unix/unix.h>
 #include <vppinfra/callback.h>
 #include <vppinfra/cpu.h>
@@ -1226,20 +1227,20 @@ restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
 {
   vlib_global_main_t *vgm = vlib_get_global_main ();
   clib_file_main_t *fm = &file_main;
-  clib_file_t *f;
 
   /* environ(7) does not indicate a header for this */
   extern char **environ;
 
   /* Close all known open files */
-  pool_foreach (f, fm->file_pool)
-     {
+  pool_foreach_pointer (f, fm->file_pool)
+    {
       if (f->file_descriptor > 2)
         close(f->file_descriptor);
     }
 
   /* Exec ourself */
-  execve (vgm->name, (char **) vgm->argv, environ);
+  if (execve ((void *) vgm->argv[0], (char **) vgm->argv, environ))
+    return clib_error_return_unix (0, "execve failed");
 
   return 0;
 }

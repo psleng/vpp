@@ -72,6 +72,21 @@ typedef struct
   vlib_buffer_t buffer;
 } af_packet_tx_trace_t;
 
+always_inline word
+af_packet_error_is_fatal (word error)
+{
+  switch (error)
+    {
+#ifdef CLIB_UNIX
+    case EAGAIN:
+    case ENOBUFS:
+    case EINTR:
+      return 0;
+#endif
+    }
+  return 1;
+}
+
 #ifndef CLIB_MARCH_VARIANT
 u8 *
 format_af_packet_device_name (u8 * s, va_list * args)
@@ -84,6 +99,21 @@ format_af_packet_device_name (u8 * s, va_list * args)
   return s;
 }
 #endif /* CLIB_MARCH_VARIANT */
+
+static u8 *
+format_af_packet_offload_flag (u8 *s, va_list *args)
+{
+  af_packet_offload_flag_t af_oflags =
+    va_arg (*args, af_packet_offload_flag_t);
+  u32 indent = va_arg (*args, u32);
+
+#define _(o, n, str)                                                          \
+  if (af_oflags & AF_PACKET_OFFLOAD_FLAG_##o)                                 \
+    s = format (s, "\n%U%s", format_white_space, indent + 3, str);
+  foreach_af_packet_offload_flag
+#undef _
+    return s;
+}
 
 static u8 *
 format_af_packet_device (u8 * s, va_list * args)
@@ -106,6 +136,13 @@ format_af_packet_device (u8 * s, va_list * args)
     s = format (s, "\n%Ucksum-gso-enabled", format_white_space, indent + 2);
   if (apif->is_fanout_enabled)
     s = format (s, "\n%Ufanout-enabled", format_white_space, indent + 2);
+  s = format (s, "\n%UHost Interface Offload:", format_white_space, indent);
+  s = format (s, "\n%Ucreation time:%U", format_white_space, indent + 2,
+	      format_af_packet_offload_flag, apif->host_interface_oflags,
+	      indent);
+  s = format (s, "\n%Unow:%U", format_white_space, indent + 2,
+	      format_af_packet_offload_flag,
+	      af_packet_get_if_capabilities (apif->host_if_name), indent);
 
   vec_foreach (rx_queue, apif->rx_queues)
     {
@@ -583,9 +620,13 @@ VNET_DEVICE_CLASS_TX_FN (af_packet_device_class) (vlib_main_t * vm,
 	   */
 	  uword counter;
 
-	  if (unix_error_is_fatal (errno))
+	  if (af_packet_error_is_fatal (errno))
 	    {
 	      counter = AF_PACKET_TX_ERROR_TXRING_FATAL;
+	      vlib_log_err (apm->log_class,
+			    "af_packet_%s sendto failed: %d %s",
+			    apif->host_if_name, errno, strerror (errno));
+	      /* TODO attempt to reattach */
 	    }
 	  else
 	    {

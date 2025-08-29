@@ -128,14 +128,14 @@ prepare_linked_xform (struct rte_crypto_sym_xform *xforms,
 
   xform_cipher->cipher.algo = cipher_algo;
   xform_cipher->cipher.key.data = key_cipher->data;
-  xform_cipher->cipher.key.length = vec_len (key_cipher->data);
+  xform_cipher->cipher.key.length = key_cipher->length;
   xform_cipher->cipher.iv.length = 16;
   xform_cipher->cipher.iv.offset = CRYPTODEV_IV_OFFSET;
 
   xform_auth->auth.algo = auth_algo;
   xform_auth->auth.digest_length = digest_len;
   xform_auth->auth.key.data = key_auth->data;
-  xform_auth->auth.key.length = vec_len (key_auth->data);
+  xform_auth->auth.key.length = key_auth->length;
 
   return 0;
 }
@@ -608,7 +608,7 @@ format_cryptodev_inst (u8 * s, va_list * args)
   cryptodev_main_t *cmt = &cryptodev_main;
   u32 inst = va_arg (*args, u32);
   cryptodev_inst_t *cit = cmt->cryptodev_inst + inst;
-  u32 thread_index = 0;
+  clib_thread_index_t thread_index = 0;
   struct rte_cryptodev_info info;
 
   rte_cryptodev_info_get (cit->dev_id, &info);
@@ -670,7 +670,7 @@ cryptodev_show_cache_rings_fn (vlib_main_t *vm, unformat_input_t *input,
 			       vlib_cli_command_t *cmd)
 {
   cryptodev_main_t *cmt = &cryptodev_main;
-  u32 thread_index = 0;
+  clib_thread_index_t thread_index = 0;
   u16 i;
   vec_foreach_index (thread_index, cmt->per_thread_data)
     {
@@ -756,7 +756,7 @@ cryptodev_set_assignment_fn (vlib_main_t * vm, unformat_input_t * input,
   cryptodev_main_t *cmt = &cryptodev_main;
   cryptodev_engine_thread_t *cet;
   unformat_input_t _line_input, *line_input = &_line_input;
-  u32 thread_index, inst_index;
+  clib_thread_index_t thread_index, inst_index;
   u32 thread_present = 0, inst_present = 0;
   clib_error_t *error = 0;
   int ret;

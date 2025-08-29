@@ -326,7 +326,7 @@ typedef struct
   vnet_crypto_async_frame_elt_t elts[VNET_CRYPTO_FRAME_SIZE];
   u32 buffer_indices[VNET_CRYPTO_FRAME_SIZE];
   u16 next_node_index[VNET_CRYPTO_FRAME_SIZE];
-  u32 enqueue_thread_index;
+  clib_thread_index_t enqueue_thread_index;
 } vnet_crypto_async_frame_t;
 
 typedef struct
@@ -353,9 +353,9 @@ typedef void (vnet_crypto_key_fn_t) (vnet_crypto_key_op_t kop,
 /** async crypto function handlers **/
 typedef int (vnet_crypto_frame_enq_fn_t) (vlib_main_t *vm,
 					  vnet_crypto_async_frame_t *frame);
-typedef vnet_crypto_async_frame_t *
-  (vnet_crypto_frame_dequeue_t) (vlib_main_t * vm, u32 * nb_elts_processed,
-				 u32 * enqueue_thread_idx);
+typedef vnet_crypto_async_frame_t *(
+  vnet_crypto_frame_dequeue_t) (vlib_main_t *vm, u32 *nb_elts_processed,
+				clib_thread_index_t *enqueue_thread_idx);
 
 u32
 vnet_crypto_register_engine (vlib_main_t * vm, char *name, int prio,
@@ -420,17 +420,28 @@ typedef struct
 
 typedef struct
 {
+  char *name;
+  u8 is_disabled;
+  u8 is_enabled;
+} vnet_crypto_config_t;
+
+typedef struct
+{
   vnet_crypto_key_t **keys;
   u8 keys_lock;
   u32 crypto_node_index;
   vnet_crypto_thread_t *threads;
   vnet_crypto_frame_dequeue_t **dequeue_handlers;
   vnet_crypto_engine_t *engines;
+  /* configs and hash by name */
+  vnet_crypto_config_t *configs;
+  uword *config_index_by_name;
   uword *engine_index_by_name;
   uword *alg_index_by_name;
   vnet_crypto_async_next_node_t *next_nodes;
   vnet_crypto_alg_data_t algs[VNET_CRYPTO_N_ALGS];
   vnet_crypto_op_data_t opt_data[VNET_CRYPTO_N_OP_IDS];
+  u8 default_disabled;
 } vnet_crypto_main_t;
 
 extern vnet_crypto_main_t crypto_main;

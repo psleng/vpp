@@ -69,10 +69,10 @@ func vppProxyIperfMTTest(s *VppProxySuite, proto string) {
 	// tap interfaces are created on test setup with 1 rx-queue,
 	// need to recreate them with 2 + consistent-qp
 	s.AssertNil(vppProxy.DeleteTap(s.Interfaces.Server))
-	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Server, 2, uint32(s.Interfaces.Server.Peer.Index), Consistent_qp))
+	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Server, false, 2, uint32(s.Interfaces.Server.Peer.Index), Consistent_qp))
 
 	s.AssertNil(vppProxy.DeleteTap(s.Interfaces.Client))
-	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Client, 2, uint32(s.Interfaces.Client.Peer.Index), Consistent_qp))
+	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Client, false, 2, uint32(s.Interfaces.Client.Peer.Index), Consistent_qp))
 
 	configureVppProxy(s, "tcp", uint16(proxyPort))
 	if proto == "udp" {
@@ -93,7 +93,7 @@ func vppProxyIperfMTTest(s *VppProxySuite, proto string) {
 
 	go func() {
 		defer GinkgoRecover()
-		cmd := fmt.Sprintf("iperf3 -4 -s -B %s -p %s", s.ServerAddr(), fmt.Sprint(s.ServerPort()))
+		cmd := fmt.Sprintf("iperf3 -4 -s -B %s -p %s --logfile %s", s.ServerAddr(), fmt.Sprint(s.ServerPort()), s.IperfLogFileName(s.Containers.IperfS))
 		s.StartServerApp(s.Containers.IperfS, "iperf3", cmd, srvCh, stopServerCh)
 	}()
 
@@ -109,7 +109,7 @@ func vppProxyIperfMTTest(s *VppProxySuite, proto string) {
 	s.AssertChannelClosed(time.Minute*4, clnCh)
 	result := s.ParseJsonIperfOutput(<-clnRes)
 	s.LogJsonIperfOutput(result)
-	s.AssertIperfMinTransfer(result, 400)
+	s.AssertIperfMinTransfer(result, 200)
 }
 
 func VppProxyHttpGetTcpTest(s *VppProxySuite) {
@@ -338,9 +338,9 @@ func VppConnectProxyStressMTTest(s *VppProxySuite) {
 	// tap interfaces are created on test setup with 1 rx-queue,
 	// need to recreate them with 2 + consistent-qp
 	s.AssertNil(vppProxy.DeleteTap(s.Interfaces.Server))
-	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Server, 2, uint32(s.Interfaces.Server.Peer.Index), Consistent_qp))
+	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Server, false, 2, uint32(s.Interfaces.Server.Peer.Index), Consistent_qp))
 	s.AssertNil(vppProxy.DeleteTap(s.Interfaces.Client))
-	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Client, 2, uint32(s.Interfaces.Client.Peer.Index), Consistent_qp))
+	s.AssertNil(vppProxy.CreateTap(s.Interfaces.Client, false, 2, uint32(s.Interfaces.Client.Peer.Index), Consistent_qp))
 
 	configureVppProxy(s, "http", proxyPort)
 

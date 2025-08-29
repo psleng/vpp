@@ -13,20 +13,15 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/docker/go-units"
-
+	. "fd.io/hs-test/infra/common"
 	"github.com/cilium/cilium/pkg/sysctl"
 	containerTypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/go-units"
 	"github.com/edwarnicke/exechelper"
-	. "github.com/onsi/ginkgo/v2"
-)
-
-const (
-	logDir    string = "/tmp/hs-test/"
-	volumeDir string = "/volumes"
+	"github.com/onsi/ginkgo/v2"
 )
 
 var (
@@ -93,7 +88,7 @@ func newContainer(suite *HstSuite, yamlInput ContainerConfig) (*Container, error
 	}
 
 	if _, ok := yamlInput["volumes"]; ok {
-		workingVolumeDir := logDir + suite.GetCurrentTestName() + volumeDir
+		workingVolumeDir := LogDir + suite.GetCurrentTestName() + VolumeDir
 		workDirReplacer := strings.NewReplacer("$HST_DIR", workDir)
 		volDirReplacer := strings.NewReplacer("$HST_VOLUME_DIR", workingVolumeDir)
 		for _, volu := range yamlInput["volumes"].([]interface{}) {
@@ -172,6 +167,9 @@ func (c *Container) Create() error {
 	c.Suite.AssertNil(err)
 
 	for _, image := range images {
+		if len(image.RepoTags) == 0 {
+			continue
+		}
 		sliceOfImageNames = append(sliceOfImageNames, strings.Split(image.RepoTags[0], ":")[0])
 	}
 	if !slices.Contains(sliceOfImageNames, c.Image) {
@@ -455,12 +453,12 @@ func (c *Container) ExecServer(useEnvVars bool, command string, arguments ...any
 		envVars = ""
 	}
 	containerExecCommand := fmt.Sprintf("docker exec -d %s %s %s", envVars, c.Name, serverCommand)
-	GinkgoHelper()
+	ginkgo.GinkgoHelper()
 	c.Suite.Log(containerExecCommand)
 	c.Suite.AssertNil(exechelper.Run(containerExecCommand))
 }
 
-func (c *Container) Exec(useEnvVars bool, command string, arguments ...any) string {
+func (c *Container) Exec(useEnvVars bool, command string, arguments ...any) (string, error) {
 	var envVars string
 	serverCommand := fmt.Sprintf(command, arguments...)
 	if useEnvVars {
@@ -469,11 +467,10 @@ func (c *Container) Exec(useEnvVars bool, command string, arguments ...any) stri
 		envVars = ""
 	}
 	containerExecCommand := fmt.Sprintf("docker exec %s %s %s", envVars, c.Name, serverCommand)
-	GinkgoHelper()
+	ginkgo.GinkgoHelper()
 	c.Suite.Log(containerExecCommand)
 	byteOutput, err := exechelper.CombinedOutput(containerExecCommand)
-	c.Suite.AssertNil(err, fmt.Sprint(err))
-	return string(byteOutput)
+	return string(byteOutput), err
 }
 
 func (c *Container) saveLogs() {
@@ -533,12 +530,15 @@ func (c *Container) stop() error {
 	if c.VppInstance != nil && c.VppInstance.ApiStream != nil {
 		c.VppInstance.saveLogs()
 		c.VppInstance.Disconnect()
+		c.VppInstance.Stop()
 	}
+	timeout := 0
 	c.VppInstance = nil
 	c.saveLogs()
-
 	c.Suite.Log("Stopping container " + c.Name)
-	timeout := 0
+	if c.Suite.CoverageRun {
+		timeout = 3
+	}
 	if err := c.Suite.Docker.ContainerStop(c.ctx, c.ID, containerTypes.StopOptions{Timeout: &timeout}); err != nil {
 		return err
 	}
@@ -548,7 +548,7 @@ func (c *Container) stop() error {
 func (c *Container) CreateConfigFromTemplate(targetConfigName string, templateName string, values any) {
 	template := template.Must(template.ParseFiles(templateName))
 
-	f, err := os.CreateTemp(logDir, "hst-config")
+	f, err := os.CreateTemp(LogDir, "hst-config")
 	c.Suite.AssertNil(err, err)
 	defer os.Remove(f.Name())
 
@@ -562,7 +562,7 @@ func (c *Container) CreateConfigFromTemplate(targetConfigName string, templateNa
 }
 
 func init() {
-	cmd := exec.Command("mkdir", "-p", logDir)
+	cmd := exec.Command("mkdir", "-p", LogDir)
 	if err := cmd.Run(); err != nil {
 		panic(err)
 	}

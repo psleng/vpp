@@ -21,7 +21,26 @@
 #include <base/roc_api.h>
 #include <dev_octeon/hw_defs.h>
 
+#define OCT_NPA_MAX_POOLS	   128
 #define OCT_BATCH_ALLOC_IOVA0_MASK 0xFFFFFFFFFFFFFF80
+
+typedef enum
+{
+  OCT_DRV_ARG_NPA_MAX_POOLS = 1,
+  OCT_DRV_ARG_END,
+} oct_drv_args_t;
+
+typedef enum
+{
+  OCT_PORT_ARG_EN_ETH_PAUSE_FRAME = 1,
+  OCT_PORT_ARG_END
+} oct_port_args_t;
+
+typedef enum
+{
+  OCT_DEV_ARG_CRYPTO_N_DESC = 1,
+  OCT_DEV_ARG_END,
+} oct_dev_args_t;
 
 typedef enum
 {
@@ -43,6 +62,7 @@ typedef struct
   u32 speed;
   struct plt_pci_device plt_pci_dev;
   struct roc_nix *nix;
+  oct_msix_handler_info_t *msix_handler;
 } oct_device_t;
 
 typedef struct
@@ -60,6 +80,7 @@ typedef struct
   u8 lf_allocated : 1;
   u8 tm_initialized : 1;
   u8 npc_initialized : 1;
+  u8 q_intr_enabled : 1;
   struct roc_npc npc;
   oct_flow_entry_t *flow_entries;
 } oct_port_t;
@@ -109,6 +130,14 @@ typedef struct
   struct roc_nix_sq sq;
 } oct_txq_t;
 
+typedef struct
+{
+  u8 is_config_done;
+  u32 npa_max_pools;
+} oct_main_t;
+
+extern oct_main_t oct_main;
+
 /* format.c */
 format_function_t format_oct_port_status;
 format_function_t format_oct_rx_trace;
@@ -133,6 +162,7 @@ void oct_tx_queue_free (vlib_main_t *, vnet_dev_tx_queue_t *);
 vnet_dev_rv_t oct_rxq_init (vlib_main_t *, vnet_dev_rx_queue_t *);
 vnet_dev_rv_t oct_txq_init (vlib_main_t *, vnet_dev_tx_queue_t *);
 void oct_rxq_deinit (vlib_main_t *, vnet_dev_rx_queue_t *);
+int oct_drain_queue (vlib_main_t *vm, vnet_dev_rx_queue_t *rxq);
 void oct_txq_deinit (vlib_main_t *, vnet_dev_tx_queue_t *);
 format_function_t format_oct_rxq_info;
 format_function_t format_oct_txq_info;

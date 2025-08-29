@@ -42,7 +42,7 @@
 #include <linux/if_tun.h>
 
 #include <vlib/vlib.h>
-#include <vlib/unix/unix.h>
+#include <vlib/file.h>
 
 #include <vnet/ip/ip.h>
 #include <vnet/fib/fib_table.h>
@@ -153,7 +153,7 @@ tuntap_tx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
   vnet_interface_main_t *im = &vnm->interface_main;
   u32 n_bytes = 0;
   int i;
-  u16 thread_index = vm->thread_index;
+  clib_thread_index_t thread_index = vm->thread_index;
 
   for (i = 0; i < n_packets; i++)
     {
@@ -242,7 +242,7 @@ tuntap_rx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
   vlib_buffer_t *b;
   u32 bi;
   const uword buffer_size = vlib_buffer_get_default_data_size (vm);
-  u16 thread_index = vm->thread_index;
+  clib_thread_index_t thread_index = vm->thread_index;
 
   /** Make sure we have some RX buffers. */
   {

@@ -16,6 +16,7 @@
 #include <vnet/session/application_interface.h>
 #include <vnet/session/application.h>
 #include <vnet/session/session.h>
+#include <vnet/tls/tls_types.h>
 #include <vppinfra/lock.h>
 
 #ifndef SRC_VNET_TLS_TLS_H_
@@ -80,7 +81,8 @@ STATIC_ASSERT (sizeof (tls_ctx_id_t) <= TRANSPORT_CONN_ID_LEN,
   _ (NO_APP_SESSION, "no-app-session")                                        \
   _ (RESUME, "resume")                                                        \
   _ (HS_DONE, "handshake-done")                                               \
-  _ (ASYNC_RD, "async-read")
+  _ (ASYNC_RD, "async-read")                                                  \
+  _ (SHUTDOWN_TRANSPORT, "shutdown-transport")
 
 typedef enum tls_conn_flags_bit_
 {
@@ -121,6 +123,8 @@ typedef struct tls_ctx_
   u8 *srv_hostname;
   u32 ckpair_index;
   transport_proto_t tls_type;
+  u8 *alpn_list;
+  tls_alpn_proto_t alpn_selected;
 } tls_ctx_t;
 
 typedef struct tls_main_
@@ -133,6 +137,7 @@ typedef struct tls_main_
   u8 **rx_bufs;
   u8 **tx_bufs;
 
+  uword *alpn_proto_by_str;
   /*
    * Config
    */
@@ -146,10 +151,10 @@ typedef struct tls_main_
 typedef struct tls_engine_vft_
 {
   u32 (*ctx_alloc) (void);
-  u32 (*ctx_alloc_w_thread) (u32 thread_index);
+  u32 (*ctx_alloc_w_thread) (clib_thread_index_t thread_index);
   void (*ctx_free) (tls_ctx_t * ctx);
   void *(*ctx_detach) (tls_ctx_t *ctx);
-  u32 (*ctx_attach) (u32 thread_index, void *ctx);
+  u32 (*ctx_attach) (clib_thread_index_t thread_index, void *ctx);
   tls_ctx_t *(*ctx_get) (u32 ctx_index);
   tls_ctx_t *(*ctx_get_w_thread) (u32 ctx_index, u8 thread_index);
   int (*ctx_init_client) (tls_ctx_t * ctx);
@@ -179,6 +184,7 @@ int tls_notify_app_connected (tls_ctx_t * ctx, session_error_t err);
 void tls_notify_app_enqueue (tls_ctx_t * ctx, session_t * app_session);
 void tls_notify_app_io_error (tls_ctx_t *ctx);
 void tls_disconnect_transport (tls_ctx_t * ctx);
+void tls_shutdown_transport (tls_ctx_t *ctx);
 
 void tls_add_postponed_ho_cleanups (u32 ho_index);
 void tls_flush_postponed_ho_cleanups ();

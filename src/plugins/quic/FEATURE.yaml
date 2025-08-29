@@ -1,9 +1,9 @@
 ---
 name: QUIC Protocol
-maintainer: Aloys Augustin <aloaugus@cisco.com>
+maintainer: Dave Wallace <dwallacelf@gmail.com>
 features:
   - host stack integration via session layer
-  - "based on the Quicly library: https://github.com/h2o/quicly"
+    quic library api to allow selection of quic implementation
 description: "IETF QUIC Protocol implementation"
 state: experimental
 properties: [API, CLI, STATS, MULTITHREAD]

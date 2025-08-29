@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 )
 
@@ -28,10 +29,10 @@ type LdpSuite struct {
 }
 
 func RegisterLdpTests(tests ...func(s *LdpSuite)) {
-	ldpTests[getTestFilename()] = tests
+	ldpTests[GetTestFilename()] = tests
 }
 func RegisterSoloLdpTests(tests ...func(s *LdpSuite)) {
-	ldpSoloTests[getTestFilename()] = tests
+	ldpSoloTests[GetTestFilename()] = tests
 }
 
 func (s *LdpSuite) SetupSuite() {
@@ -96,12 +97,17 @@ func (s *LdpSuite) SetupTest() {
 	}
 }
 
-func (s *LdpSuite) TearDownTest() {
+func (s *LdpSuite) TeardownTest() {
+	if CurrentSpecReport().Failed() {
+		s.CollectIperfLogs(s.Containers.ServerVpp)
+		s.CollectRedisServerLogs(s.Containers.ServerVpp)
+	}
+
 	for _, container := range s.StartedContainers {
 		delete(container.EnvVars, "LD_PRELOAD")
 		delete(container.EnvVars, "VCL_CONFIG")
 	}
-	s.HstSuite.TearDownTest()
+	s.HstSuite.TeardownTest()
 
 }
 
@@ -127,7 +133,7 @@ func (s *LdpSuite) SetupServerVpp(serverContainer *Container) {
 	serverVpp := serverContainer.VppInstance
 	s.AssertNil(serverVpp.Start())
 
-	idx, err := serverVpp.createAfPacket(s.Interfaces.Server)
+	idx, err := serverVpp.createAfPacket(s.Interfaces.Server, false)
 	s.AssertNil(err, fmt.Sprint(err))
 	s.AssertNotEqual(0, idx)
 }
@@ -136,7 +142,7 @@ func (s *LdpSuite) setupClientVpp(clientContainer *Container) {
 	clientVpp := clientContainer.VppInstance
 	s.AssertNil(clientVpp.Start())
 
-	idx, err := clientVpp.createAfPacket(s.Interfaces.Client)
+	idx, err := clientVpp.createAfPacket(s.Interfaces.Client, false)
 	s.AssertNil(err, fmt.Sprint(err))
 	s.AssertNotEqual(0, idx)
 }
@@ -150,11 +156,11 @@ var _ = Describe("LdpSuite", Ordered, ContinueOnFailure, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	// https://onsi.github.io/ginkgo/#dynamically-generating-specs
@@ -181,10 +187,10 @@ var _ = Describe("LdpSuiteSolo", Ordered, ContinueOnFailure, Serial, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	// https://onsi.github.io/ginkgo/#dynamically-generating-specs

@@ -53,7 +53,7 @@ signal_evt_to_cli (int code)
 }
 
 static inline ec_worker_t *
-ec_worker_get (u32 thread_index)
+ec_worker_get (clib_thread_index_t thread_index)
 {
   return vec_elt_at_index (ec_main.wrk, thread_index);
 }
@@ -79,21 +79,29 @@ ec_session_get (ec_worker_t *wrk, u32 ec_index)
 static void
 send_data_chunk (ec_main_t *ecm, ec_session_t *es)
 {
+  const u64 max_burst = 128000;
   u8 *test_data = ecm->connect_test_data;
   int test_buf_len, test_buf_offset, rv;
+  u64 bytes_to_send;
   u32 bytes_this_chunk;
+  svm_fifo_t *f = es->tx_fifo;
 
   test_buf_len = vec_len (test_data);
   ASSERT (test_buf_len > 0);
+  if (ecm->run_time)
+    bytes_to_send = clib_min (svm_fifo_max_enqueue_prod (f), max_burst);
+  else
+    bytes_to_send = clib_min (es->bytes_to_send, max_burst);
+  if (ecm->throughput)
+    bytes_to_send = clib_min (es->bytes_paced_current, bytes_to_send);
   test_buf_offset = es->bytes_sent % test_buf_len;
-  bytes_this_chunk =
-    clib_min (test_buf_len - test_buf_offset, es->bytes_to_send);
+
+  bytes_this_chunk = clib_min (test_buf_len - test_buf_offset, bytes_to_send);
 
   if (!es->is_dgram)
     {
       if (ecm->no_copy)
 	{
-	  svm_fifo_t *f = es->tx_fifo;
 	  rv = clib_min (svm_fifo_max_enqueue_prod (f), bytes_this_chunk);
 	  svm_fifo_enqueue_nocopy (f, rv);
 	  session_program_tx_io_evt (es->tx_fifo->vpp_sh, SESSION_IO_EVT_TX);
@@ -105,7 +113,6 @@ send_data_chunk (ec_main_t *ecm, ec_session_t *es)
     }
   else
     {
-      svm_fifo_t *f = es->tx_fifo;
       u32 max_enqueue = svm_fifo_max_enqueue_prod (f);
 
       if (max_enqueue < sizeof (session_dgram_hdr_t))
@@ -136,7 +143,8 @@ send_data_chunk (ec_main_t *ecm, ec_session_t *es)
       else
 	{
 	  bytes_this_chunk = clib_min (bytes_this_chunk, max_enqueue);
-	  bytes_this_chunk = clib_min (bytes_this_chunk, 1460);
+	  if (!ecm->throughput)
+	    bytes_this_chunk = clib_min (bytes_this_chunk, 1460);
 	  rv =
 	    app_send_dgram ((app_session_t *) es, test_data + test_buf_offset,
 			    bytes_this_chunk, 0);
@@ -147,8 +155,16 @@ send_data_chunk (ec_main_t *ecm, ec_session_t *es)
   if (rv > 0)
     {
       /* Account for it... */
-      es->bytes_to_send -= rv;
       es->bytes_sent += rv;
+      if (ecm->run_time)
+	es->bytes_to_receive += rv;
+      else
+	es->bytes_to_send -= rv;
+      if (ecm->throughput)
+	{
+	  es->bytes_paced_current -= rv;
+	  es->bytes_paced_current += es->bytes_paced_target;
+	}
 
       if (ecm->cfg.verbose)
 	{
@@ -228,6 +244,7 @@ ec_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
   u32 *conn_indices, *conns_this_batch, nconns_this_batch;
   int thread_index = vm->thread_index, i, delete_session;
+  f64 time_now;
   ec_main_t *ecm = &ec_main;
   ec_worker_t *wrk;
   ec_session_t *es;
@@ -266,7 +283,7 @@ ec_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
     {
       ecm->repeats++;
       ecm->prev_conns = vec_len (conns_this_batch);
-      if (ecm->repeats == 500000)
+      if (ecm->repeats == 500000 && !ecm->run_time)
 	{
 	  ec_err ("stuck clients");
 	}
@@ -277,18 +294,23 @@ ec_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
       ecm->repeats = 0;
     }
 
+  time_now = vlib_time_now (ecm->vlib_main);
   /*
    * Handle connections in this batch
    */
   for (i = 0; i < vec_len (conns_this_batch); i++)
     {
       es = ec_session_get (wrk, conns_this_batch[i]);
+      if (ecm->throughput && time_now < es->time_to_send)
+	continue;
 
       delete_session = 1;
 
       if (es->bytes_to_send > 0)
 	{
 	  send_data_chunk (ecm, es);
+	  if (ecm->throughput)
+	    es->time_to_send += ecm->pacing_window_len;
 	  delete_session = 0;
 	}
 
@@ -297,7 +319,7 @@ ec_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 	  delete_session = 0;
 	}
 
-      if (PREDICT_FALSE (delete_session == 1))
+      if (PREDICT_FALSE (delete_session == 1) || ecm->timer_expired)
 	{
 	  clib_atomic_fetch_add (&ecm->tx_total, es->bytes_sent);
 	  clib_atomic_fetch_add (&ecm->rx_total, es->bytes_received);
@@ -326,6 +348,8 @@ ec_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 	      signal_evt_to_cli (EC_CLI_TEST_DONE);
 	    }
 	}
+      if (ecm->throughput)
+	time_now = vlib_time_now (vm);
     }
 
   wrk->conn_indices = conn_indices;
@@ -356,6 +380,7 @@ ec_reset_runtime_config (ec_main_t *ecm)
   ecm->tls_engine = CRYPTO_ENGINE_OPENSSL;
   ecm->no_copy = 0;
   ecm->run_test = EC_STARTING;
+  ecm->timer_expired = false;
   ecm->ready_connections = 0;
   ecm->connect_conn_index = 0;
   ecm->rx_total = 0;
@@ -368,6 +393,9 @@ ec_reset_runtime_config (ec_main_t *ecm)
   ecm->attach_flags = 0;
   ecm->syn_timeout = 20.0;
   ecm->test_timeout = 20.0;
+  ecm->run_time = 0;
+  ecm->throughput = 0;
+  ecm->pacing_window_len = 1;
   vec_free (ecm->connect_uri);
 }
 
@@ -474,7 +502,8 @@ ec_cleanup (ec_main_t *ecm)
 
   vec_free (ecm->connect_uri);
   vec_free (ecm->appns_id);
-
+  if (ecm->throughput)
+    ecm->pacing_window_len = 1;
   if (ecm->barrier_acq_needed)
     vlib_worker_thread_barrier_sync (ecm->vlib_main);
 }
@@ -565,7 +594,7 @@ quic_ec_session_connected_callback (u32 app_index, u32 api_context,
   ec_main_t *ecm = &ec_main;
   ec_session_t *es;
   ec_worker_t *wrk;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
 
   if (PREDICT_FALSE (api_context == HS_CTRL_HANDLE))
     return ec_ctrl_session_connected_callback (s);
@@ -616,13 +645,59 @@ quic_ec_session_connected_callback (u32 app_index, u32 api_context,
   return 0;
 }
 
+static void
+ec_calc_tput (ec_main_t *ecm)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  ec_worker_t *wrk;
+  ec_session_t *sess;
+  f64 pacing_base;
+  u64 bytes_paced_target;
+  u64 target_size_threshold;
+
+  /* Choose an appropriate data size chunk threshold based on fifo size.
+     ~30k is fine for most scenarios, unless the fifo starts getting
+     smaller than 48k, where a slight curve is needed. */
+  if (PREDICT_TRUE (ecm->fifo_size > 49152))
+    target_size_threshold = 30720;
+  else if (ecm->fifo_size > 20480)
+    target_size_threshold = 12288;
+  else if (ecm->fifo_size > 10240)
+    target_size_threshold = 6144;
+  else
+    target_size_threshold = ecm->fifo_size;
+
+  /* find a suitable pacing window length & data chunk size */
+  bytes_paced_target =
+    ecm->throughput * ecm->pacing_window_len / ecm->n_clients;
+  while (bytes_paced_target > target_size_threshold)
+    {
+      ecm->pacing_window_len /= 2;
+      bytes_paced_target /= 2;
+    }
+
+  /* order sessions to shoot out data sequentially */
+  pacing_base = vlib_time_now (vm) - ecm->pacing_window_len;
+  vec_foreach (wrk, ecm->wrk)
+    {
+      vec_foreach (sess, wrk->sessions)
+	{
+	  sess->time_to_send =
+	    pacing_base + ecm->pacing_window_len / ecm->n_clients;
+	  pacing_base = sess->time_to_send;
+	  sess->bytes_paced_target = bytes_paced_target;
+	  sess->bytes_paced_current = bytes_paced_target;
+	}
+    }
+}
+
 static int
 ec_session_connected_callback (u32 app_index, u32 api_context, session_t *s,
 			       session_error_t err)
 {
   ec_main_t *ecm = &ec_main;
   ec_session_t *es;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   ec_worker_t *wrk;
 
   if (PREDICT_FALSE (ecm->run_test != EC_STARTING))
@@ -656,12 +731,16 @@ ec_session_connected_callback (u32 app_index, u32 api_context, session_t *s,
   es->bytes_to_receive = ecm->echo_bytes ? ecm->bytes_to_send : 0ULL;
   es->vpp_session_handle = session_handle (s);
   es->vpp_session_index = s->session_index;
+  es->bytes_paced_target = ~0;
+  es->bytes_paced_current = ~0;
   s->opaque = es->session_index;
 
   vec_add1 (wrk->conn_indices, es->session_index);
   clib_atomic_fetch_add (&ecm->ready_connections, 1);
   if (ecm->ready_connections == ecm->expected_connections)
     {
+      if (ecm->throughput)
+	ec_calc_tput (ecm);
       ecm->run_test = EC_RUNNING;
       /* Signal the CLI process that the action is starting... */
       signal_evt_to_cli (EC_CLI_CONNECTS_DONE);
@@ -1072,8 +1151,8 @@ ec_command_fn (vlib_main_t *vm, unformat_input_t *input,
   ec_main_t *ecm = &ec_main;
   uword *event_data = 0, event_type;
   clib_error_t *error = 0;
-  int rv, had_config = 1;
-  u64 tmp, total_bytes;
+  int rv, timed_run_conflict = 0, had_config = 1;
+  u64 total_bytes;
   f64 delta;
 
   if (ecm->test_client_attached)
@@ -1099,16 +1178,14 @@ ec_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	;
       else if (unformat (line_input, "quic-streams %d", &ecm->quic_streams))
 	;
-      else if (unformat (line_input, "mbytes %lld", &tmp))
-	ecm->bytes_to_send = tmp << 20;
-      else if (unformat (line_input, "gbytes %lld", &tmp))
-	ecm->bytes_to_send = tmp << 30;
       else if (unformat (line_input, "bytes %U", unformat_memory_size,
 			 &ecm->bytes_to_send))
-	;
+	timed_run_conflict++;
       else if (unformat (line_input, "test-timeout %f", &ecm->test_timeout))
 	;
       else if (unformat (line_input, "syn-timeout %f", &ecm->syn_timeout))
+	;
+      else if (unformat (line_input, "run-time %f", &ecm->run_time))
 	;
       else if (unformat (line_input, "echo-bytes"))
 	ecm->echo_bytes = 1;
@@ -1120,6 +1197,9 @@ ec_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	;
       else if (unformat (line_input, "private-segment-size %U",
 			 unformat_memory_size, &ecm->private_segment_size))
+	;
+      else if (unformat (line_input, "throughput %U", unformat_memory_size,
+			 &ecm->throughput))
 	;
       else if (unformat (line_input, "preallocate-fifos"))
 	ecm->prealloc_fifos = 1;
@@ -1152,6 +1232,9 @@ ec_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	  goto cleanup;
 	}
     }
+
+  if (timed_run_conflict && ecm->run_time)
+    return clib_error_return (0, "failed: invalid arguments for a timed run!");
 
 parse_config:
 
@@ -1237,12 +1320,22 @@ parse_config:
 	clib_error_return (0, "failed: unexpected event(2): %d", event_type);
       goto stop_test;
     }
+  /* Testing officially starts now */
+  ecm->test_start_time = vlib_time_now (ecm->vlib_main);
+  ec_cli ("Test started at %.6f", ecm->test_start_time);
+
+  /*
+   * If a timed run, wait and expire timer
+   */
+  if (ecm->run_time)
+    {
+      vlib_process_suspend (vm, ecm->run_time);
+      ec_main.timer_expired = true;
+    }
 
   /*
    * Wait for the sessions to finish or test_timeout seconds pass
    */
-  ecm->test_start_time = vlib_time_now (ecm->vlib_main);
-  ec_cli ("Test started at %.6f", ecm->test_start_time);
   vlib_process_wait_for_event_or_clock (vm, ecm->test_timeout);
   event_type = vlib_process_get_events (vm, &event_data);
   switch (event_type)
@@ -1336,11 +1429,11 @@ cleanup:
 VLIB_CLI_COMMAND (ec_command, static) = {
   .path = "test echo clients",
   .short_help =
-    "test echo clients [nclients %d][[m|g]bytes <bytes>]"
-    "[test-timeout <time>][syn-timeout <time>][echo-bytes][fifo-size <size>]"
+    "test echo clients [nclients %d][bytes <bytes>[m|g]][test-timeout <time>]"
+    "[run-time <time>][syn-timeout <time>][echo-bytes][fifo-size <size>]"
     "[private-segment-count <count>][private-segment-size <bytes>[m|g]]"
     "[preallocate-fifos][preallocate-sessions][client-batch <batch-size>]"
-    "[uri <tcp://ip/port>][test-bytes][verbose]",
+    "[throughput <bytes>[m|g]][uri <tcp://ip/port>][test-bytes][verbose]",
   .function = ec_command_fn,
   .is_mp_safe = 1,
 };

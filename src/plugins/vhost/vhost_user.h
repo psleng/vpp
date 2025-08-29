@@ -62,11 +62,13 @@
 	   dev->hw_if_index, ##__VA_ARGS__);                                  \
 };
 
-#define UNIX_GET_FD(unixfd_idx) ({ \
-    typeof(unixfd_idx) __unixfd_idx = (unixfd_idx); \
-    (__unixfd_idx != ~0) ? \
-        pool_elt_at_index (file_main.file_pool, \
-                           __unixfd_idx)->file_descriptor : -1; })
+#define UNIX_GET_FD(unixfd_idx)                                               \
+  ({                                                                          \
+    typeof (unixfd_idx) __unixfd_idx = (unixfd_idx);                          \
+    (__unixfd_idx != ~0) ?                                                    \
+      clib_file_get (&file_main, __unixfd_idx)->file_descriptor :             \
+      -1;                                                                     \
+  })
 
 #define foreach_virtio_trace_flags \
   _ (SIMPLE_CHAINED, 0, "Simple descriptor chaining") \
@@ -229,7 +231,7 @@ typedef struct
   u16 last_kick;
   u8 first_kick;
   u32 queue_index;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
 } vhost_user_vring_t;
 
 #define VHOST_USER_EVENT_START_TIMER 1

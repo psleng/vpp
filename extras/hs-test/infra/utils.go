@@ -2,7 +2,6 @@ package hst
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,9 @@ import (
 const networkTopologyDir string = "topo-network/"
 const containerTopologyDir string = "topo-containers/"
 const HttpCapsuleTypeDatagram = uint64(0)
+const iperfLogFileName = "iperf.log"
+const redisLogFileName = "redis-server.log"
+const h2loadLogFileName = "h2load.tsv"
 
 type Stanza struct {
 	content string
@@ -36,43 +38,6 @@ type JsonResult struct {
 	Desc      string
 	ErrOutput string
 	StdOutput string
-}
-
-type IPerfResult struct {
-	Start struct {
-		Timestamp struct {
-			Time string `json:"time"`
-		} `json:"timestamp"`
-		Connected []struct {
-			Socket     int    `json:"socket"`
-			LocalHost  string `json:"local_host"`
-			LocalPort  int    `json:"local_port"`
-			RemoteHost string `json:"remote_host"`
-			RemotePort int    `json:"remote_port"`
-		} `json:"connected"`
-		Version string `json:"version"`
-		Details struct {
-			Protocol string `json:"protocol"`
-		} `json:"test_start"`
-	} `json:"start"`
-	End struct {
-		TcpSent *struct {
-			MbitsPerSecond float64 `json:"bits_per_second"`
-			MBytes         float64 `json:"bytes"`
-		} `json:"sum_sent,omitempty"`
-		TcpReceived *struct {
-			MbitsPerSecond float64 `json:"bits_per_second"`
-			MBytes         float64 `json:"bytes"`
-		} `json:"sum_received,omitempty"`
-		Udp *struct {
-			MbitsPerSecond float64 `json:"bits_per_second"`
-			JitterMs       float64 `json:"jitter_ms,omitempty"`
-			LostPackets    int     `json:"lost_packets,omitempty"`
-			Packets        int     `json:"packets,omitempty"`
-			LostPercent    float64 `json:"lost_percent,omitempty"`
-			MBytes         float64 `json:"bytes"`
-		} `json:"sum,omitempty"`
-	} `json:"end"`
 }
 
 func AssertFileSize(f1, f2 string) error {
@@ -125,11 +90,12 @@ func (s *Stanza) SaveToFile(fileName string) error {
 	return err
 }
 
-// NewHttpClient creates [http.Client] with disabled proxy and redirects, it also sets timeout to 30seconds.
-func NewHttpClient(timeout time.Duration) *http.Client {
+// NewHttpClient creates [http.Client] with disabled proxy and redirects.
+func NewHttpClient(timeout time.Duration, enableHTTP2 bool) *http.Client {
 	transport := http.DefaultTransport
 	transport.(*http.Transport).Proxy = nil
 	transport.(*http.Transport).DisableKeepAlives = true
+	transport.(*http.Transport).ForceAttemptHTTP2 = enableHTTP2
 	transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client := &http.Client{
 		Transport: transport,
@@ -216,6 +182,51 @@ func (s *HstSuite) CollectEnvoyLogs(envoyContainer *Container) {
 	targetDir := envoyContainer.Suite.getLogDirPath()
 	source := envoyContainer.GetHostWorkDir() + "/" + envoyContainer.Name + "-"
 	cmd := exec.Command("cp", "-t", targetDir, source+"access.log")
+	s.Log(cmd.String())
+	err := cmd.Run()
+	if err != nil {
+		s.Log(fmt.Sprint(err))
+	}
+}
+
+func (s *HstSuite) IperfLogFileName(serverContainer *Container) string {
+	return serverContainer.GetContainerWorkDir() + "/" + serverContainer.Name + "-" + iperfLogFileName
+}
+
+func (s *HstSuite) CollectIperfLogs(serverContainer *Container) {
+	targetDir := serverContainer.Suite.getLogDirPath()
+	source := serverContainer.GetHostWorkDir() + "/" + serverContainer.Name + "-" + iperfLogFileName
+	cmd := exec.Command("cp", "-t", targetDir, source)
+	s.Log(cmd.String())
+	err := cmd.Run()
+	if err != nil {
+		s.Log(fmt.Sprint(err))
+	}
+}
+
+func (s *HstSuite) RedisServerLogFileName(serverContainer *Container) string {
+	return serverContainer.GetContainerWorkDir() + "/" + serverContainer.Name + "-" + redisLogFileName
+}
+
+func (s *HstSuite) CollectRedisServerLogs(serverContainer *Container) {
+	targetDir := serverContainer.Suite.getLogDirPath()
+	source := serverContainer.GetHostWorkDir() + "/" + serverContainer.Name + "-" + redisLogFileName
+	cmd := exec.Command("cp", "-t", targetDir, source)
+	s.Log(cmd.String())
+	err := cmd.Run()
+	if err != nil {
+		s.Log(fmt.Sprint(err))
+	}
+}
+
+func (s *HstSuite) H2loadLogFileName(h2loadContainer *Container) string {
+	return h2loadContainer.GetContainerWorkDir() + "/" + h2loadContainer.Name + "-" + h2loadLogFileName
+}
+
+func (s *HstSuite) CollectH2loadLogs(h2loadContainer *Container) {
+	targetDir := h2loadContainer.Suite.getLogDirPath()
+	source := h2loadContainer.GetHostWorkDir() + "/" + h2loadContainer.Name + "-" + h2loadLogFileName
+	cmd := exec.Command("cp", "-t", targetDir, source)
 	s.Log(cmd.String())
 	err := cmd.Run()
 	if err != nil {
@@ -343,65 +354,4 @@ func (s *HstSuite) StartClientApp(c *Container, cmd string,
 	} else {
 		clnRes <- o
 	}
-}
-
-func (s *HstSuite) ParseJsonIperfOutput(jsonResult []byte) IPerfResult {
-	var result IPerfResult
-	// remove iperf warning line if present
-	if strings.Contains(string(jsonResult), "warning") {
-		index := strings.Index(string(jsonResult), "\n")
-		jsonResult = jsonResult[index+1:]
-	}
-
-	err := json.Unmarshal(jsonResult, &result)
-	s.AssertNil(err)
-
-	if result.Start.Details.Protocol == "TCP" {
-		result.End.TcpSent.MbitsPerSecond = result.End.TcpSent.MbitsPerSecond / 1000000
-		result.End.TcpSent.MBytes = result.End.TcpSent.MBytes / 1000000
-		result.End.TcpReceived.MbitsPerSecond = result.End.TcpReceived.MbitsPerSecond / 1000000
-		result.End.TcpReceived.MBytes = result.End.TcpReceived.MBytes / 1000000
-	} else {
-		result.End.Udp.MBytes = result.End.Udp.MBytes / 1000000
-		result.End.Udp.MbitsPerSecond = result.End.Udp.MbitsPerSecond / 1000000
-	}
-
-	return result
-}
-
-func (s *HstSuite) LogJsonIperfOutput(result IPerfResult) {
-	s.Log("\n*******************************************\n"+
-		"%s\n"+
-		"[%s] %s:%d connected to %s:%d\n"+
-		"Started:  %s\n",
-		result.Start.Version,
-		result.Start.Details.Protocol,
-		result.Start.Connected[0].LocalHost, result.Start.Connected[0].LocalPort,
-		result.Start.Connected[0].RemoteHost, result.Start.Connected[0].RemotePort,
-		result.Start.Timestamp.Time)
-
-	if result.Start.Details.Protocol == "TCP" {
-		s.Log("Transfer (sent):     %.2f MBytes\n"+
-			"Bitrate  (sent):     %.2f Mbits/sec\n"+
-			"Transfer (received): %.2f MBytes\n"+
-			"Bitrate  (received): %.2f Mbits/sec",
-			result.End.TcpSent.MBytes,
-			result.End.TcpSent.MbitsPerSecond,
-			result.End.TcpReceived.MBytes,
-			result.End.TcpReceived.MbitsPerSecond)
-	} else {
-		s.Log("Transfer:     %.2f MBytes\n"+
-			"Bitrate:      %.2f Mbits/sec\n"+
-			"Jitter:       %.3f ms\n"+
-			"Packets:      %d\n"+
-			"Packets lost: %d\n"+
-			"Percent lost: %.2f%%",
-			result.End.Udp.MBytes,
-			result.End.Udp.MbitsPerSecond,
-			result.End.Udp.JitterMs,
-			result.End.Udp.Packets,
-			result.End.Udp.LostPackets,
-			result.End.Udp.LostPercent)
-	}
-	s.Log("*******************************************\n")
 }

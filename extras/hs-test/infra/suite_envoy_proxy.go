@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	. "fd.io/hs-test/infra/common"
 	. "github.com/onsi/ginkgo/v2"
 )
 
@@ -36,11 +37,11 @@ var envoyProxyTests = map[string][]func(s *EnvoyProxySuite){}
 var envoyProxySoloTests = map[string][]func(s *EnvoyProxySuite){}
 
 func RegisterEnvoyProxyTests(tests ...func(s *EnvoyProxySuite)) {
-	envoyProxyTests[getTestFilename()] = tests
+	envoyProxyTests[GetTestFilename()] = tests
 }
 
 func RegisterEnvoyProxySoloTests(tests ...func(s *EnvoyProxySuite)) {
-	envoyProxySoloTests[getTestFilename()] = tests
+	envoyProxySoloTests[GetTestFilename()] = tests
 }
 
 func (s *EnvoyProxySuite) SetupSuite() {
@@ -120,8 +121,8 @@ func (s *EnvoyProxySuite) SetupTest() {
 	s.AssertNil(vpp.Start())
 	// wait for VPP to start
 	time.Sleep(time.Second * 1)
-	s.AssertNil(vpp.CreateTap(s.Interfaces.Client, 1, 1))
-	s.AssertNil(vpp.CreateTap(s.Interfaces.Server, 1, 2))
+	s.AssertNil(vpp.CreateTap(s.Interfaces.Client, false, 1, 1))
+	s.AssertNil(vpp.CreateTap(s.Interfaces.Server, false, 1, 2))
 	s.Containers.Vpp.Exec(false, "chmod 777 -R %s", s.Containers.Vpp.GetContainerWorkDir())
 
 	// Add Ipv4 ARP entry for nginx HTTP server, otherwise first request fail (HTTP error 503)
@@ -142,12 +143,12 @@ func (s *EnvoyProxySuite) SetupTest() {
 	s.AssertNil(s.Containers.EnvoyProxy.Start())
 }
 
-func (s *EnvoyProxySuite) TearDownTest() {
+func (s *EnvoyProxySuite) TeardownTest() {
 	if CurrentSpecReport().Failed() {
 		s.CollectNginxLogs(s.Containers.NginxServerTransient)
 		s.CollectEnvoyLogs(s.Containers.EnvoyProxy)
 	}
-	s.HstSuite.TearDownTest()
+	s.HstSuite.TeardownTest()
 }
 
 func (s *EnvoyProxySuite) ProxyPort() uint16 {
@@ -182,10 +183,10 @@ var _ = Describe("EnvoyProxySuite", Ordered, ContinueOnFailure, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	for filename, tests := range envoyProxyTests {
@@ -211,10 +212,10 @@ var _ = Describe("EnvoyProxySuiteSolo", Ordered, ContinueOnFailure, func() {
 		s.SetupTest()
 	})
 	AfterAll(func() {
-		s.TearDownSuite()
+		s.TeardownSuite()
 	})
 	AfterEach(func() {
-		s.TearDownTest()
+		s.TeardownTest()
 	})
 
 	for filename, tests := range envoyProxySoloTests {

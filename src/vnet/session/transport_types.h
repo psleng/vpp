@@ -113,7 +113,7 @@ typedef struct _transport_connection
 
   u32 s_index;			/**< Parent session index */
   u32 c_index;			/**< Connection index in transport pool */
-  u32 thread_index;		/**< Worker-thread index */
+  clib_thread_index_t thread_index; /**< Worker-thread index */
   u8 flags;			/**< Transport specific flags */
   u8 dscp;			/**< Differentiated Services Code Point */
 
@@ -291,6 +291,7 @@ typedef enum transport_endpt_ext_cfg_type_
 typedef struct transport_endpt_crypto_cfg_
 {
   u32 ckpair_index;
+  u8 alpn_protos[4]; /**< ordered by preference for server */
   u8 crypto_engine;
   u8 hostname[256]; /**< full domain len is 255 as per rfc 3986 */
 } transport_endpt_crypto_cfg_t;

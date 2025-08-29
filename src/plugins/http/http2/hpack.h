@@ -7,6 +7,7 @@
 
 #include <vppinfra/types.h>
 #include <http/http2/http2.h>
+#include <http/http.h>
 
 #define HPACK_INVALID_INT CLIB_UWORD_MAX
 #if uword_bits == 64
@@ -53,7 +54,9 @@ typedef struct
   u8 *path;
   u32 path_len;
   u8 *headers;
+  uword content_len_header_index;
   u32 headers_len;
+  u32 control_data_len;
   u16 parsed_bitmap;
 } hpack_request_control_data_t;
 

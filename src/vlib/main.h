@@ -204,9 +204,18 @@ typedef struct vlib_main_t
   clib_random_buffer_t random_buffer;
 
   /* thread, cpu and numa_node indices */
-  u32 thread_index;
-  u32 cpu_id;
+  clib_thread_index_t thread_index;
   u32 numa_node;
+
+  /* epoll and eventfd */
+  int epoll_fd;
+  int wakeup_fd;
+  int n_epoll_fds;
+  u32 file_poll_skip_loops;
+  u64 epoll_files_ready;
+  u64 epoll_waits;
+  u8 wakeup_pending;
+  u8 thread_sleeps;
 
   /* control-plane API queue signal pending, length indication */
   volatile u32 queue_signal_pending;
@@ -257,6 +266,10 @@ typedef struct vlib_main_t
   /* buffer fault injector */
   u32 buffer_alloc_success_seed;
   f64 buffer_alloc_success_rate;
+
+  /* Timing wheel for scheduling time-based node dispatch. */
+  void *timing_wheel;
+  u32 n_tw_timers;
 
 #ifdef CLIB_SANITIZE_ADDR
   /* address sanitizer stack save */
@@ -319,18 +332,13 @@ typedef struct vlib_global_main_t
 /* Global main structure. */
 extern vlib_global_main_t vlib_global_main;
 
-void vlib_worker_loop (vlib_main_t * vm);
-
 always_inline f64
 vlib_time_now (vlib_main_t * vm)
 {
-#if CLIB_DEBUG > 0
-  extern __thread uword __os_thread_index;
-#endif
   /*
    * Make sure folks don't pass &vlib_global_main from a worker thread.
    */
-  ASSERT (vm->thread_index == __os_thread_index);
+  ASSERT (vm->thread_index == os_get_thread_index ());
   return clib_time_now (&vm->clib_time) + vm->time_offset;
 }
 

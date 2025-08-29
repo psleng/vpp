@@ -519,8 +519,7 @@ vcl_session_reset_handler (vcl_worker_t * wrk,
     }
 
   /* Caught a reset before actually accepting the session */
-  if (session->session_state == VCL_STATE_LISTEN ||
-      session->session_state == VCL_STATE_LISTEN_NO_MQ)
+  if (session->session_state == VCL_STATE_LISTEN)
     {
       if (!vcl_flag_accepted_session (session, reset_msg->handle,
 				      VCL_ACCEPTED_F_RESET))
@@ -712,8 +711,7 @@ vcl_session_disconnected_handler (vcl_worker_t * wrk,
     return 0;
 
   /* Caught a disconnect before actually accepting the session */
-  if (session->session_state == VCL_STATE_LISTEN ||
-      session->session_state == VCL_STATE_LISTEN_NO_MQ)
+  if (session->session_state == VCL_STATE_LISTEN)
     {
       if (!vcl_flag_accepted_session (session, msg->handle,
 				      VCL_ACCEPTED_F_CLOSED))
@@ -1085,8 +1083,7 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
        *    VPP_CLOSING state instead can been marked as ACCEPTED_F_CLOSED.
        */
       if (vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK) &&
-	  !(s->session_state == VCL_STATE_LISTEN ||
-	    s->session_state == VCL_STATE_LISTEN_NO_MQ))
+	  !(s->session_state == VCL_STATE_LISTEN))
 	{
 	  s->session_state = VCL_STATE_VPP_CLOSING;
 	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
@@ -1114,8 +1111,7 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
        *    DISCONNECT state instead can been marked as ACCEPTED_F_RESET.
        */
       if (vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK) &&
-	  !(s->session_state == VCL_STATE_LISTEN ||
-	    s->session_state == VCL_STATE_LISTEN_NO_MQ))
+	  !(s->session_state == VCL_STATE_LISTEN))
 	{
 	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
 	  s->session_state = VCL_STATE_DISCONNECT;
@@ -1331,6 +1327,12 @@ vppcom_session_unbind (u32 session_handle)
     }
   clib_fifo_free (session->accept_evts_fifo);
 
+  if (session->flags & VCL_SESSION_F_LISTEN_NO_MQ)
+    {
+      vcl_session_free (wrk, session);
+      return VPPCOM_OK;
+    }
+
   vcl_send_session_unlisten (wrk, session);
 
   VDBG (0, "session %u [0x%llx]: sending unbind!", session->session_index,
@@ -1402,6 +1404,8 @@ vcl_api_retry_attach (vcl_worker_t *wrk)
 {
   vcl_session_t *s;
 
+  vcl_worker_detached_signal_mq (wrk);
+
   clib_spinlock_lock (&vcm->workers_lock);
   if (vcl_is_first_reattach_to_execute ())
     {
@@ -1410,12 +1414,14 @@ vcl_api_retry_attach (vcl_worker_t *wrk)
 	  clib_spinlock_unlock (&vcm->workers_lock);
 	  return;
 	}
+      vcl_worker_detached_stop_signal_mq (wrk);
       vcl_set_reattach_counter ();
       clib_spinlock_unlock (&vcm->workers_lock);
     }
   else
     {
       vcl_set_reattach_counter ();
+      vcl_worker_detached_stop_signal_mq (wrk);
       clib_spinlock_unlock (&vcm->workers_lock);
       vcl_worker_register_with_vpp ();
     }
@@ -1425,10 +1431,11 @@ vcl_api_retry_attach (vcl_worker_t *wrk)
     {
       if (s->flags & VCL_SESSION_F_IS_VEP)
 	continue;
-      if (s->session_state == VCL_STATE_LISTEN_NO_MQ)
+      if (s->session_state == VCL_STATE_LISTEN)
 	vppcom_session_listen (vcl_session_handle (s), 10);
       else
-	VDBG (0, "internal error: unexpected state %d", s->session_state);
+	VDBG (0, "reattach error: %u unexpected state %d", s->session_index,
+	      s->session_state);
     }
 }
 
@@ -1769,12 +1776,20 @@ vppcom_session_listen (uint32_t listen_sh, uint32_t q_len)
     return VPPCOM_EBADFD;
 
   listen_vpp_handle = listen_session->vpp_handle;
-  if (listen_session->session_state == VCL_STATE_LISTEN)
+  if (listen_session->session_state == VCL_STATE_LISTEN &&
+      !(listen_session->flags & VCL_SESSION_F_LISTEN_NO_MQ))
     {
-      VDBG (0, "session %u [0x%llx]: already in listen state!",
-	    listen_sh, listen_vpp_handle);
+      VDBG (0, "session %u [0x%llx]: already in listen state!", listen_sh,
+	    listen_vpp_handle);
       return VPPCOM_OK;
     }
+  if (PREDICT_FALSE (!wrk->ctrl_mq))
+    {
+      listen_session->session_state = VCL_STATE_LISTEN;
+      listen_session->flags |= VCL_SESSION_F_LISTEN_NO_MQ;
+      return VPPCOM_OK;
+    }
+  listen_session->flags &= ~VCL_SESSION_F_LISTEN_NO_MQ;
 
   VDBG (0, "session %u: sending vpp listen request...", listen_sh);
 
@@ -1851,7 +1866,6 @@ again:
     return VPPCOM_EBADFD;
 
   if ((ls->session_state != VCL_STATE_LISTEN) &&
-      (ls->session_state != VCL_STATE_LISTEN_NO_MQ) &&
       (!vcl_session_is_connectable_listener (wrk, ls)))
     {
       VDBG (0, "ERROR: session [0x%llx]: not in listen state! state (%s)",
@@ -2652,6 +2666,9 @@ vcl_select_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	  clib_bitmap_set_no_check ((uword *) except_map, sid, 1);
 	  *bits_set += 1;
 	}
+      break;
+    case SESSION_CTRL_EVT_BOUND:
+      vcl_session_bound_handler (wrk, (session_bound_msg_t *) e->data);
       break;
     case SESSION_CTRL_EVT_UNLISTEN_REPLY:
       vcl_session_unlisten_reply_handler (wrk, e->data);
@@ -3588,8 +3605,13 @@ vppcom_epoll_wait_eventfd (vcl_worker_t *wrk, struct epoll_event *events,
 
       for (i = 0; i < n_mq_evts; i++)
 	{
-	  if (PREDICT_FALSE (wrk->mq_events[i].data.u32 == ~0))
+	  if (PREDICT_FALSE (wrk->mq_events[i].data.u32 >= VCL_EP_PIPEFD_EVT))
 	    {
+	      if (wrk->mq_events[i].data.u32 == VCL_EP_PIPEFD_EVT)
+		{
+		  vcl_api_retry_attach (wrk);
+		  continue;
+		}
 	      /* api socket was closed */
 	      vcl_api_handle_disconnect (wrk);
 	      continue;
@@ -4544,17 +4566,31 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer,
       if (ep->app_tlvs)
 	vcl_handle_ep_app_tlvs (s, ep);
 
-      /* Session not connected/bound in vpp. Create it by 'connecting' it */
+      /* Session not connected/bound in vpp. Create it by binding it */
       if (PREDICT_FALSE (s->session_state == VCL_STATE_CLOSED))
 	{
 	  u32 session_index = s->session_index;
 	  f64 timeout = vcm->cfg.session_timeout;
 	  int rv;
 
-	  vcl_send_session_connect (wrk, s);
-	  rv = vppcom_wait_for_session_state_change (session_index,
-						     VCL_STATE_READY,
-						     timeout);
+	  /* VPP assumes sockets are bound, not ideal, but for now
+	   * connect socket, grab lcl ip:port pair and use it to bind */
+	  if (s->transport.rmt_port == 0 ||
+	      ip46_address_is_zero (&s->transport.lcl_ip))
+	    {
+	      vcl_send_session_connect (wrk, s);
+	      rv = vppcom_wait_for_session_state_change (
+		session_index, VCL_STATE_READY, timeout);
+	      if (rv < 0)
+		return rv;
+	      vcl_send_session_disconnect (wrk, s);
+	      rv = vppcom_wait_for_session_state_change (
+		session_index, VCL_STATE_DETACHED, timeout);
+	      s->session_state = VCL_STATE_CLOSED;
+	    }
+	  vcl_send_session_listen (wrk, s);
+	  rv = vppcom_wait_for_session_state_change (
+	    session_index, VCL_STATE_LISTEN, timeout);
 	  if (rv < 0)
 	    return rv;
 	  s = vcl_session_get (wrk, session_index);

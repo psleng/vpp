@@ -17,6 +17,7 @@
 #include <vnet/session/application_interface.h>
 #include <vnet/session/application_namespace.h>
 #include <vnet/session/application_local.h>
+#include <vnet/session/application_eventing.h>
 #include <vnet/session/session.h>
 #include <vnet/session/segment_manager.h>
 
@@ -490,7 +491,7 @@ vlib_node_registration_t appsl_rx_mqs_input_node;
 VLIB_NODE_FN (appsl_rx_mqs_input_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  u32 thread_index = vm->thread_index, n_msgs = 0;
+  clib_thread_index_t thread_index = vm->thread_index, n_msgs = 0;
   app_rx_mq_elt_t *elt, *next;
   app_main_t *am = &app_main;
   session_worker_t *wrk;
@@ -581,7 +582,7 @@ app_rx_mqs_epoll_add (application_t *app, app_rx_mq_elt_t *mqe)
 {
   clib_file_t template = { 0 };
   app_rx_mq_handle_t handle;
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   int fd;
 
   thread_index = mqe - app->rx_mqs;
@@ -603,7 +604,7 @@ app_rx_mqs_epoll_add (application_t *app, app_rx_mq_elt_t *mqe)
 static void
 app_rx_mqs_epoll_del (application_t *app, app_rx_mq_elt_t *mqe)
 {
-  u32 thread_index = mqe - app->rx_mqs;
+  clib_thread_index_t thread_index = mqe - app->rx_mqs;
   app_main_t *am = &app_main;
   appsl_wrk_t *aw;
 
@@ -854,6 +855,9 @@ application_alloc_and_init (app_init_args_t *a)
   if (opts[APP_OPTIONS_PCT_FIRST_ALLOC])
     props->pct_first_alloc = opts[APP_OPTIONS_PCT_FIRST_ALLOC];
   props->segment_type = seg_type;
+
+  if (opts[APP_OPTIONS_FLAGS] & APP_OPTIONS_FLAGS_LOG_COLLECTOR)
+    app->cb_fns.app_evt_callback = app_evt_collector_get_cb_fn ();
 
   /* Add app to lookup by api_client_index table */
   if (!application_is_builtin (app))

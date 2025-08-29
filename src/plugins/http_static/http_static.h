@@ -25,6 +25,7 @@
 
 #define HSS_DEFAULT_MAX_AGE 600
 #define HSS_DEFAULT_MAX_BODY_SIZE     8192
+#define HSS_DEFAULT_RX_BUFFER_THRESH  1 << 20
 #define HSS_DEFAULT_KEEPALIVE_TIMEOUT 60
 
 /** @file http_static.h
@@ -33,15 +34,20 @@
 
 /** \brief Application session
  */
-typedef struct
+typedef struct hss_session_
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   u32 session_index;
   /** rx thread index */
-  u32 thread_index;
+  clib_thread_index_t thread_index;
   /** vpp session index, handle */
   u32 vpp_session_index;
   session_handle_t vpp_session_handle;
+  /** Index of listener for which connection was accepted */
+  u32 listener_index;
+  u8 *target_path;
+  u8 *target_query;
+  http_req_method_t rt;
   /** Fully-resolved file path */
   u8 *path;
   /** Data to send */
@@ -58,6 +64,15 @@ typedef struct
   http_headers_ctx_t resp_headers;
   /** Response header buffer */
   u8 *headers_buf;
+  /** RX buffer (POST body) */
+  u8 *rx_buff;
+  /** Current RX buffer offset */
+  u64 rx_buff_offset;
+  /** POST body left to receive */
+  u64 left_recv;
+  /** threshold for switching to pointers */
+  u64 use_ptr_thresh;
+  int (*read_body_handler) (struct hss_session_ *hs, session_t *ts);
 } hss_session_t;
 
 typedef struct hss_session_handle_
@@ -67,7 +82,7 @@ typedef struct hss_session_handle_
     struct
     {
       u32 session_index;
-      u32 thread_index;
+      clib_thread_index_t thread_index;
     };
     u64 as_u64;
   };
@@ -113,6 +128,36 @@ typedef hss_url_handler_rc_t (*hss_url_handler_fn) (hss_url_handler_args_t *);
 typedef void (*hss_register_url_fn) (hss_url_handler_fn, char *, int);
 typedef void (*hss_session_send_fn) (hss_url_handler_args_t *args);
 
+typedef struct hss_listener_
+{
+  /** Path to file hash table */
+  hss_cache_t cache;
+  /** The bind session endpoint e.g., tcp://0.0.0.0:80 */
+  session_endpoint_cfg_t sep;
+  /** root path to be served */
+  u8 *www_root;
+  /** Threshold for switching to ptr data in http msgs */
+  u64 use_ptr_thresh;
+  /** Max cache size before LRU occurs */
+  u64 cache_size;
+  /** Maximum size of a request body (in bytes) **/
+  u64 max_body_size;
+  /** Maximum size of a large memory allocation */
+  u32 rx_buff_thresh;
+  /** Timeout during which client connection will stay open */
+  u32 keepalive_timeout;
+  /** How long a response is considered fresh (in seconds) */
+  u32 max_age;
+  /** Formatted max_age: "max-age=xyz" */
+  u8 *max_age_formatted;
+  /** Enable the use of builtinurls */
+  u8 enable_url_handlers;
+  /** Index in listener pool */
+  u32 l_index;
+  /** Listener session handle */
+  session_handle_t session_handle;
+} hss_listener_t;
+
 /** \brief Main data structure
  */
 typedef struct
@@ -120,14 +165,12 @@ typedef struct
   /** Per thread vector of session pools */
   hss_session_t **sessions;
 
+  /** Listeners pool */
+  hss_listener_t *listeners;
+
   /** Hash tables for built-in GET and POST handlers */
   uword *get_url_handlers;
   uword *post_url_handlers;
-
-  hss_cache_t cache;
-
-  /** root path to be served */
-  u8 *www_root;
 
   /** Application index */
   u32 app_index;
@@ -144,6 +187,11 @@ typedef struct
    * Config
    */
 
+  /** Listener configured with server, if any */
+  hss_listener_t default_listener;
+  u8 have_default_listener;
+  u8 is_init;
+
   /** Enable debug messages */
   int debug_level;
   /** Number of preallocated fifos, usually 0 */
@@ -152,22 +200,6 @@ typedef struct
   u64 private_segment_size;
   /** Size of the allocated rx, tx fifos, roughly 8K or so */
   u32 fifo_size;
-  /** The bind URI, defaults to tcp://0.0.0.0/80 */
-  u8 *uri;
-  /** Threshold for switching to ptr data in http msgs */
-  u64 use_ptr_thresh;
-  /** Enable the use of builtinurls */
-  u8 enable_url_handlers;
-  /** Max cache size before LRU occurs */
-  u64 cache_size;
-  /** How long a response is considered fresh (in seconds) */
-  u32 max_age;
-  /** Maximum size of a request body (in bytes) **/
-  u64 max_body_size;
-  /** Formatted max_age: "max-age=xyz" */
-  u8 *max_age_formatted;
-  /** Timeout during which client connection will stay open */
-  u32 keepalive_timeout;
 
   /** hash table of file extensions to mime types string indices */
   uword *mime_type_indices_by_file_extensions;
@@ -177,6 +209,16 @@ extern hss_main_t hss_main;
 
 int hss_create (vlib_main_t *vm);
 
+static inline hss_listener_t *
+hss_listener_get (u32 l_index)
+{
+  hss_main_t *hsm = &hss_main;
+
+  if (pool_is_free_index (hsm->listeners, l_index))
+    return 0;
+  return pool_elt_at_index (hsm->listeners, l_index);
+}
+
 /**
  * Register a GET or POST URL handler
  */
@@ -184,7 +226,8 @@ void hss_register_url_handler (hss_url_handler_fn fp, const char *url,
 			       http_req_method_t type);
 void hss_session_send_data (hss_url_handler_args_t *args);
 void hss_builtinurl_json_handlers_init (void);
-hss_session_t *hss_session_get (u32 thread_index, u32 hs_index);
+hss_session_t *hss_session_get (clib_thread_index_t thread_index,
+				u32 hs_index);
 
 #endif /* __included_http_static_h__ */
 

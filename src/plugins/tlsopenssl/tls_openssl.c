@@ -35,7 +35,7 @@
 openssl_main_t openssl_main;
 
 static u32
-openssl_ctx_alloc_w_thread (u32 thread_index)
+openssl_ctx_alloc_w_thread (clib_thread_index_t thread_index)
 {
   openssl_main_t *om = &openssl_main;
   openssl_ctx_t **ctx;
@@ -50,6 +50,11 @@ openssl_ctx_alloc_w_thread (u32 thread_index)
   (*ctx)->ctx.tls_ctx_engine = CRYPTO_ENGINE_OPENSSL;
   (*ctx)->ctx.app_session_handle = SESSION_INVALID_HANDLE;
   (*ctx)->openssl_ctx_index = ctx - om->ctx_pool[thread_index];
+
+  /* Initialize llists for async events */
+  if (openssl_main.async)
+    tls_async_evts_init_list (&((*ctx)->async_ctx));
+
   return ((*ctx)->openssl_ctx_index);
 }
 
@@ -71,19 +76,12 @@ openssl_ctx_free (tls_ctx_t * ctx)
 	  !(ctx->flags & TLS_CONN_F_PASSIVE_CLOSE))
 	SSL_shutdown (oc->ssl);
 
+      if (openssl_main.async)
+	tls_async_evts_free_list (ctx);
+
       SSL_free (oc->ssl);
       vec_free (ctx->srv_hostname);
       SSL_CTX_free (oc->client_ssl_ctx);
-
-      if (openssl_main.async)
-	{
-	  openssl_evt_free (oc->evt_index[SSL_ASYNC_EVT_INIT],
-			    ctx->c_thread_index);
-	  openssl_evt_free (oc->evt_index[SSL_ASYNC_EVT_RD],
-			    ctx->c_thread_index);
-	  openssl_evt_free (oc->evt_index[SSL_ASYNC_EVT_WR],
-			    ctx->c_thread_index);
-	}
     }
 
   pool_put_index (openssl_main.ctx_pool[ctx->c_thread_index],
@@ -102,7 +100,7 @@ openssl_ctx_detach (tls_ctx_t *ctx)
 }
 
 static u32
-openssl_ctx_attach (u32 thread_index, void *ctx_ptr)
+openssl_ctx_attach (clib_thread_index_t thread_index, void *ctx_ptr)
 {
   openssl_main_t *om = &openssl_main;
   session_handle_t sh;
@@ -175,9 +173,6 @@ openssl_read_from_ssl_into_fifo (svm_fifo_t *f, tls_ctx_t *ctx, u32 max_len)
   svm_fifo_seg_t fs[n_segs];
   u32 max_enq;
   SSL *ssl = oc->ssl;
-
-  if (ctx->flags & TLS_CONN_F_ASYNC_RD)
-    return 0;
 
   max_enq = svm_fifo_max_enqueue_prod (f);
   if (!max_enq)
@@ -252,15 +247,15 @@ openssl_write_from_fifo_into_ssl (svm_fifo_t *f, tls_ctx_t *ctx,
 
 	      if (err == SSL_ERROR_WANT_WRITE)
 		break;
-
-	      if (openssl_main.async && SSL_want_async (ssl))
+	      if (openssl_main.async &&
+		  (err == SSL_ERROR_WANT_ASYNC || SSL_want_async (ssl)))
 		{
 		  session_t *ts =
 		    session_get_from_handle (ctx->tls_session_handle);
 		  vpp_tls_async_init_event (ctx, tls_async_write_event_handler,
 					    ts, SSL_ASYNC_EVT_WR, sp,
 					    sp->max_burst_size);
-		  return 0;
+		  break;
 		}
 	    }
 	  break;
@@ -272,6 +267,14 @@ openssl_write_from_fifo_into_ssl (svm_fifo_t *f, tls_ctx_t *ctx,
     svm_fifo_dequeue_drop (f, wrote);
 
   return wrote;
+}
+
+u8 *
+format_openssl_alpn_proto (u8 *s, va_list *va)
+{
+  const unsigned char *proto = va_arg (*va, const unsigned char *);
+  unsigned int proto_len = va_arg (*va, unsigned int);
+  return format (s, "%U", format_ascii_bytes, proto, proto_len);
 }
 
 void
@@ -350,6 +353,22 @@ openssl_ctx_handshake_rx (tls_ctx_t *ctx, session_t *tls_session)
   /*
    * Handshake complete
    */
+  if (ctx->alpn_list)
+    {
+      const unsigned char *proto = 0;
+      unsigned int proto_len;
+      SSL_get0_alpn_selected (oc->ssl, &proto, &proto_len);
+      if (proto_len)
+	{
+	  TLS_DBG (1, "Selected ALPN protocol: %U", format_openssl_alpn_proto,
+		   proto, proto_len);
+	  tls_alpn_proto_id_t id = { .len = (u8) proto_len,
+				     .base = (u8 *) proto };
+	  ctx->alpn_selected = tls_alpn_proto_by_str (&id);
+	}
+      else
+	TLS_DBG (1, "No ALPN negotiated");
+    }
   if (!SSL_is_server (oc->ssl))
     {
       /*
@@ -403,7 +422,10 @@ openssl_confirm_app_close (tls_ctx_t *ctx)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
   SSL_shutdown (oc->ssl);
-  tls_disconnect_transport (ctx);
+  if (ctx->flags & TLS_CONN_F_SHUTDOWN_TRANSPORT)
+    tls_shutdown_transport (ctx);
+  else
+    tls_disconnect_transport (ctx);
   session_transport_closed_notify (&ctx->connection);
 }
 
@@ -548,7 +570,7 @@ openssl_ctx_write (tls_ctx_t *ctx, session_t *app_session,
     return openssl_ctx_write_dtls (ctx, app_session, sp);
 }
 
-static inline int
+int
 openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
@@ -780,6 +802,18 @@ openssl_ctx_init_client (tls_ctx_t * ctx)
   SSL_CTX_set_options (oc->client_ssl_ctx, flags);
   SSL_CTX_set1_cert_store (oc->client_ssl_ctx, om->cert_store);
 
+  if (ctx->alpn_list)
+    {
+      rv = SSL_CTX_set_alpn_protos (oc->client_ssl_ctx,
+				    (const unsigned char *) ctx->alpn_list,
+				    (unsigned int) vec_len (ctx->alpn_list));
+      if (rv != 0)
+	{
+	  TLS_DBG (1, "Couldn't set alpn protos");
+	  return -1;
+	}
+    }
+
   oc->ssl = SSL_new (oc->client_ssl_ctx);
   if (oc->ssl == NULL)
     {
@@ -849,6 +883,22 @@ openssl_ctx_init_client (tls_ctx_t * ctx)
   TLS_DBG (2, "tls state for [%u]%u is %s", ctx->c_thread_index,
 	   oc->openssl_ctx_index, SSL_state_string_long (oc->ssl));
   return 0;
+}
+
+static int
+openssl_alpn_select_cb (SSL *ssl, const unsigned char **out,
+			unsigned char *outlen, const unsigned char *in,
+			unsigned int inlen, void *arg)
+{
+  u8 *proto_list = arg;
+  if (SSL_select_next_proto (
+	(unsigned char **) out, outlen, (const unsigned char *) proto_list,
+	vec_len (proto_list), in, inlen) != OPENSSL_NPN_NEGOTIATED)
+    {
+      TLS_DBG (1, "server support no alpn proto advertised by client");
+      return SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+  return SSL_TLSEXT_ERR_OK;
 }
 
 static int
@@ -993,6 +1043,10 @@ openssl_start_listen (tls_ctx_t * lctx)
 
   BIO_free (cert_bio);
 
+  if (lctx->alpn_list)
+    SSL_CTX_set_alpn_select_cb (ssl_ctx, openssl_alpn_select_cb,
+				(void *) lctx->alpn_list);
+
   olc_index = openssl_listen_ctx_alloc ();
   olc = openssl_lctx_get (olc_index);
   olc->ssl_ctx = ssl_ctx;
@@ -1090,7 +1144,10 @@ static int
 openssl_transport_close (tls_ctx_t * ctx)
 {
   if (openssl_main.async && vpp_openssl_is_inflight (ctx))
-    return 0;
+    {
+      TLS_DBG (2, "Close Transport but evts inflight: Flags: %ld", ctx->flags);
+      return 0;
+    }
 
   if (!(ctx->flags & TLS_CONN_F_HS_DONE))
     {
